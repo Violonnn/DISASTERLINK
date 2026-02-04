@@ -5,7 +5,7 @@
 <div class="min-h-screen bg-base-100 flex flex-col items-center justify-center p-6 space-y-6 bg-gradient-to-r from-cyan-500 to-blue-500">
   
   <!-- Hero / Title -->
-  <h1 class="text-4xl md:text-5xl font-bold text-center">SAFETY  COORDINATION   TRANSPARENCY</h1>
+  <h1 class="text-4xl md:text-5xl font-bold text-center">SAFETY   COORDINATION   TRANSPARENCY</h1>
   <p class="text-gray-600 text-center max-w-md">
     Integrated Municipal Needs
   </p>
