@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { supabase } from "$lib/supabase";
+  import { goto } from '$app/navigation';
+
   let showModal = false;
   let modalType: 'login' | 'signup' = 'login';
 
@@ -7,6 +10,31 @@
     showModal = true;
   };
   const closeModal = () => showModal = false;
+
+  let email = "";
+  let password = "";
+  let loading = false;
+
+  async function handleLogin() {
+    loading = true;
+    
+    // This tells Supabase to check the "Secret Vault" (auth.users)
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email,
+      password: password,
+    });
+
+    if (error) {
+     
+      // validation diri if sayop ang credential
+    } else {
+     goto('/general-page');
+    }
+    
+    loading = false;
+  }
+  
+  
 </script>
 
 {#if showModal}
@@ -18,9 +46,26 @@
       {#if modalType === 'login'}
         <div class="flex flex-col items-end relative top-20 right">
           <h2 class="text-xl font-bold mb-4 relative right-25">Welcome Back!</h2>
-          <input type="text" placeholder="Username" class="w-60 border p-1 rounded-lg mb-2 text-sm" />
-          <input type="password" placeholder="Password" class="w-60 ` border p-1 rounded-lg mb-2 text-sm" />
-          <button class="relative right-5 w-50 bg-gray-800 text-white py-2 rounded">Log In</button>
+          <input 
+           bind:value={email}
+           type="text"
+           placeholder="Email" 
+           class="w-60 border p-1 rounded-lg mb-2 text-sm"
+           
+           />
+          <input bind:value={password}
+           type="password" 
+           placeholder="Password"
+            class="w-60 ` border p-1 rounded-lg mb-2 text-sm"
+             />
+
+          <button 
+      on:click={handleLogin}
+      disabled={loading}
+      class="relative right-5 w-50 bg-gray-800 text-white py-2 rounded"
+    >
+      {loading ? 'Loading :)).' : 'Log In'}
+    </button>
         </div>
         
       {:else}
@@ -31,7 +76,7 @@
           <input type="password" placeholder="Password" class="w-60 border p-1 rounded mb-2 text-sm" />
           <button class="relative right-5 w-50 bg-gray-800 text-white py-2 rounded">Sign Up</button>
         </div>
-        
+
       {/if}
     </div>
       <img src="/imgs/landing1.png" alt="" class="absolute inset-0 w-full h-full object-contain opacity-20 pointer-events-none" />
