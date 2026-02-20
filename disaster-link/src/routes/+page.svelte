@@ -1,60 +1,20 @@
-<script lang="ts">
-  let showModal = false;
-  let modalType: 'login' | 'signup' = 'login';
-
-  const openModal = (type: 'login' | 'signup') => {
-    modalType = type;
-    showModal = true;
-  };
-  const closeModal = () => showModal = false;
-</script>
-
-{#if showModal}
-  <div class="fixed inset-0 bg-opacity-50 flex items-center justify-center z-50 ">
-    <div class="bg-[#4E6883] rounded-lg shadow-lg p-6 w-150 h-90  relative">
-      <img src="/imgs/login1.png" alt="" class="absolute inset-0 w-full h-full object-contain pointer-events-none" />
-      <button class="absolute top-2 right-3 text-gray-500 hover:text-gray-800" on:click={closeModal}>✕</button>
-      
-      {#if modalType === 'login'}
-        <div class="flex flex-col items-end relative top-20 right">
-          <h2 class="text-xl font-bold mb-4 relative right-25">Welcome Back!</h2>
-          <input type="text" placeholder="Username" class="w-60 border p-1 rounded-lg mb-2 text-sm" />
-          <input type="password" placeholder="Password" class="w-60 ` border p-1 rounded-lg mb-2 text-sm" />
-          <button class="relative right-5 w-50 bg-gray-800 text-white py-2 rounded">Log In</button>
-        </div>
-        
-      {:else}
-        <div class="flex flex-col items-end relative top-20 right">
-          <h2 class="text-xl font-bold mb-4 relative right-28">Sign Up Now!</h2>
-          <input type="text" placeholder="Username" class="w-60 border p-1 rounded mb-2 text-sm" />
-          <input type="email" placeholder="Email" class="w-60 border p-1 rounded mb-2 text-sm" />
-          <input type="password" placeholder="Password" class="w-60 border p-1 rounded mb-2 text-sm" />
-          <button class="relative right-5 w-50 bg-gray-800 text-white py-2 rounded">Sign Up</button>
-        </div>
-        
-      {/if}
-    </div>
-      <img src="/imgs/landing1.png" alt="" class="absolute inset-0 w-full h-full object-contain opacity-20 pointer-events-none" />
-  </div>
-{/if}
-
-
-
 <div class="min-h-screen flex flex-col items-center justify-center p-6 bg-[linear-gradient(130deg,#0C212F_35%,#2F4B5D_100%)] relative cursor-default">
   
-<img src="/imgs/landing1.png" alt="" class="absolute inset-0 w-full h-full object-contain opacity-20 pointer-events-none" />
+<img src="/imgs/landing1.png" alt="" class="absolute inset-0 w-full h-full object-cover opacity-20 pointer-events-none" />
 
 
 <div class="fixed top-0 left-0 w-full bg-white/3-0 shadow-md z-50">
-  <div class="max-w-screen-xl mx-auto flex justify-end items-center h-12 px-3 space-x-4">
-    <h1 class="relative right-240 text-gray-500" style="font-family: 'Playfair Display SC', serif">DISASTERLINK</h1>
-    <a on:click={() => openModal('signup')} class="text-white text-sm font-medium hover:underline hover:cursor-pointer">Sign Up</a>
-    <button on:click={() => openModal('login')} class="bg-[#768391] text-black rounded px-5 py-1 text-sm hover:bg-gray-300 transition pt-1 hover:cursor-pointer">Log In</button>
+  <div class="max-w-screen-xl mx-auto flex justify-between items-center h-12 px-4 md:px-4">
+    <h1 class="relative text-xs md:text-sm text-gray-500" style="font-family: 'Playfair Display SC', serif">DISASTERLINK</h1>
+    <div class="flex items-center space-x-3 md:space-x-6">
+      <a href="signup" class="text-white text-xs md:sm font-medium hover:underline hover:cursor-pointer">Sign Up</a>
+      <a href="login" class="bg-[#768391] text-black rounded px-4 md:px-5 text-xs md:text-sm hover:bg-gray-300 transition p-1 hover:cursor-pointer">Log In</a>
+    </div>
   </div>
 </div>
 
 
-  <h1 class="relative left-5 font-playfairsc text-4xl font-bold text-center text-[#ffffff] mb-1" style="font-family: 'Playfair Display SC', serif">Hyper Local Coordination Hub</h1>
+  <h1 style="font-family: 'Playfair Display SC', serif" class="relative left-5 font-playfairsc text-xl md:text-4xl font-bold text-center text-[#ffffff] mb-1 opacity-60">HYPER LOCAL COORDINATION HUB</h1>
   <p class="relative left-5 text-gray-300 text-center max-w-md mt-0 font-light">SAFETY ● COORDINATION ● TRANSPARENCY</p>
 
 
