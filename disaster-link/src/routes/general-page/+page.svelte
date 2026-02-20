@@ -11,7 +11,7 @@
     <h1 class="text-3xl font-bold text-center">Feature2 Hii</h1>
   </div>
 
-asds
+
 
 </div>
 
