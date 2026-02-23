@@ -1,9 +1,11 @@
 <div class="min-h-screen flex flex-col items-center justify-center p-6 bg-[linear-gradient(130deg,#0C212F_35%,#2F4B5D_100%)] relative cursor-default">
 <!-- <div class=" min-h-screen flex flex-col items-center justify-center bg-[linear-gradient(130deg,#2F4B5D_10%,#1B2E3A_100%)] relative cursor-default"> -->
-    <img src="/imgs/landing1.png" alt="" class="absolute inset-0 w-full h-full object-cover opacity-20 pointer-events-none" />
+    <img src="/imgs/landing1.png" alt="" class="absolute inset-0 w-full h-full object-contain opacity-20 pointer-events-none" />
 
-    <div class="fixed top-0 left-0 w-full bg-white/3-0 shadow-md z-50">
-        <h1 class="relative text-gray-500 p-3 left-6" style="font-family: 'Playfair Display SC', serif">DISASTERLINK</h1>
+     <div class="fixed top-0 left-0 w-full bg-white/3-0 shadow-md z-50">
+        <div class="max-w-screen-xl mx-auto flex justify-between items-center h-12 px-4 md:px-4">
+            <a href="/" class="relative text-xs md:text-sm text-gray-500" style="font-family: 'Playfair Display SC', serif">DISASTERLINK</a>
+    </div>
     </div>
 
     <div class="relative w-full flex flex-col items-center -mt-5">
