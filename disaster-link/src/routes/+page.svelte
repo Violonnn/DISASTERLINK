@@ -1,6 +1,6 @@
 <div class="min-h-screen flex flex-col items-center justify-center p-6 bg-[linear-gradient(130deg,#0C212F_35%,#2F4B5D_100%)] relative cursor-default">
   
-<img src="/imgs/landing1.png" alt="" class="absolute inset-0 w-full h-full object-cover opacity-20 pointer-events-none" />
+<img src="/imgs/landing1.png" alt="" class="absolute inset-0 w-full h-full object-contain opacity-20 pointer-events-none" />
 
 
 <div class="fixed top-0 left-0 w-full bg-white/3-0 shadow-md z-50">
@@ -19,7 +19,7 @@
 
 
   <div class="flex space-x-4">
-    <a href="gps" class="relative left-5 bg-[#768391] text-sm text-black rounded px-5 py-3 px-25 top-10 shadow-md hover:cursor-pointer">Locate My Location</a>
+    <a href="general-page" class="relative left-5 bg-[#768391] text-sm text-black rounded px-5 py-3 px-25 top-10 shadow-md hover:cursor-pointer">Locate My Location</a>
   </div>
 
   <!-- Small info cards (optional) -->
