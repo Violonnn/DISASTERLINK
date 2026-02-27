@@ -122,7 +122,7 @@
     <div class="relative bg-[#2F4B5D]/4 w-150 h-100 grid place-content-center rounded-[16px] shadow-lg">
         <img src="/imgs/login1.png" alt="" class="absolute inset-0 w-full h-full object-cover pointer-events-none" />
         <div class="relative w-full flex flex-col items-center">
-            <h1 class="relative text-[#2F4B5D] text-2xl font-bold -mt-25">Welcome Back!</h1>
+            <h1 class="relative text-[#2F4B5D] text-2xl font-bold -mt-10">Welcome Back!</h1>
             <span class="relative top-5 text-[#2F4B5D] font-light -mt-5 text-sm">Let's get you logged in.</span>
 
             <!-- Info banner (email not verified / proof pending) -->
@@ -134,7 +134,7 @@
 
             <!-- Error banner -->
             {#if errorMessage}
-                <div class="w-60 mt-6 bg-red-100 border border-red-400 text-red-800 text-[10px] rounded-lg px-3 py-2 text-center">
+                <div class="absolute w-60 mt-6 bg-red-100 text-red-800 text-[10px] rounded-lg px-3 py-2 text-center">
                     {errorMessage}
                 </div>
             {/if}
@@ -143,7 +143,7 @@
                 <form onsubmit={handleLogin} novalidate class="flex flex-col mt-10">
 
                     <!-- Email field -->
-                    <div class="relative pb-3">
+                    <div class="relative pb-1 mt-4">
                         <label for="EM" class="text-[10px] text-[#2F4B5D] w-full text-left ml-1">Email</label>
                         <div class="relative flex items-center">
                             <div class="absolute left-2.5 flex items-center pointer-events-none">
@@ -166,7 +166,7 @@
                     </div>
 
                     <!-- Password field -->
-                    <div class="relative pb-3 mt-2">
+                    <div class="relative pb-1">
                         <label for="PASS" class="text-[10px] text-[#2F4B5D] w-full text-left ml-1">Password</label>
                         <div class="relative flex items-center">
                             <div class="absolute left-2.5 flex items-center pointer-events-none">
@@ -193,7 +193,7 @@
                     <button
                         type="submit"
                         disabled={isSubmitting}
-                        class="relative right-10 w-40 bg-gray-800 text-white py-2 rounded-[14px] mt-4 hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center self-center"
+                        class="relative w-40 bg-gray-800 text-white py-2 rounded-[14px] mt-4 hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center self-center"
                     >
                         {#if isSubmitting}
                             <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">

@@ -132,7 +132,7 @@
   let drawnItems: L.FeatureGroup | null = null;
   let realtimeChannel: ReturnType<typeof subscribeBarangayStatusRealtime> | null = null;
 
-  let locationText = $state('Tap "Get My Location"');
+  let locationText = $state('\t -- \t');
   let isLocating = $state(false);
   let locationError = $state('');
   let locationSuccess = $state('');
@@ -1447,7 +1447,7 @@
               {userInitials || userLabel.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase() || '?'}
             </button>
             {#if openMenu === 'pfp'}
-              <div class="absolute left-0 mt-3 w-48 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30">
+              <div class="absolute left-10 mt-4 w-48 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30">
                 <p class="px-3 py-2 text-[10px] text-gray-400 border-b border-gray-100">{userLabel}</p>
                 <div class="p-2">
                   {#each (mode === 'lgu' && pfpMenuItems ? pfpMenuItems : menuItems) as item}
@@ -1477,7 +1477,7 @@
                 {/if}
               </button>
               {#if notificationsOpen}
-                <div class="absolute left-0 mt-3 w-80 max-w-[calc(100vw-2rem)] max-h-[60vh] bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30 flex flex-col">
+                <div class="absolute left-0 mt-4.5 w-80 max-w-[calc(100vw-2rem)] max-h-[60vh] bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30 flex flex-col">
                   <div class="flex items-center justify-between px-3 py-2.5 border-b border-gray-100 shrink-0">
                     <span class="text-[#1B2E3A] text-xs font-semibold">Notifications</span>
                     <div class="flex gap-1">
@@ -1513,7 +1513,7 @@
               </svg>
             </button>
             {#if openMenu === 'menu'}
-              <div class="absolute left-0 mt-3 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30 min-w-[200px] md:min-w-[220px]">
+              <div class="absolute -left-9 mt-4.5 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30 min-w-[200px] md:min-w-[220px]">
                 <div class="p-2">
                   <div class="grid grid-cols-3 gap-1">
                     {#each (mode === 'lgu' && hamburgerMenuItems ? hamburgerMenuItems : menuItems) as item}
@@ -1742,7 +1742,7 @@
         <div class="flex justify-end pointer-events-auto w-full md:w-auto">
           <button
             onclick={openReportPanel}
-            class="flex items-center gap-2 px-4 py-3 md:px-4 md:py-2.5 bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium rounded-xl shadow-lg backdrop-blur-sm transition-all cursor-pointer touch-manipulation min-h-[44px] md:min-h-0"
+            class="flex items-center gap-2 px-4 py-3 md:px-4 md:py-2.5 bg-[#5A7380] hover:bg-[#ADC0C9] text-white text-sm font-medium rounded-xl shadow-lg backdrop-blur-sm transition-all cursor-pointer touch-manipulation min-h-[44px] md:min-h-0"
             aria-label="Report hazard or disaster"
           >
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">

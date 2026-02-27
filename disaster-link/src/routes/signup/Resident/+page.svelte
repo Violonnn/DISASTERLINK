@@ -158,7 +158,7 @@
 
                 <!-- First Name -->
                 <div class="relative pb-3">
-                    <label for="FN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">First Name <span class="text-red-500">*</span></label>
+                    <label for="FN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">First Name</label>
                     <input
                         id="FN"
                         name="firstName"
@@ -174,7 +174,7 @@
 
                 <!-- Last Name -->
                 <div class="relative pb-3">
-                    <label for="LN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">Last Name <span class="text-red-500">*</span></label>
+                    <label for="LN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">Last Name</label>
                     <input
                         id="LN"
                         name="lastName"
@@ -193,7 +193,7 @@
 
                 <!-- Email Address (spans 2 columns on md+) -->
                 <div class="relative pb-3 md:col-span-2 w-full text-left ml-1">
-                    <label for="EM" class="text-[10px] text-[#2F4B5D]">Email Address <span class="text-red-500">*</span></label>
+                    <label for="EM" class="text-[10px] text-[#2F4B5D]">Email Address</label>
                     <input
                         id="EM"
                         name="email"
@@ -209,7 +209,7 @@
 
                 <!-- Contact Number -->
                 <div class="relative pb-3">
-                    <label for="PN" class="text-[10px] text-[#2F4B5D]">Contact Number <span class="text-red-500">*</span></label>
+                    <label for="PN" class="text-[10px] text-[#2F4B5D]">Contact Number</label>
                     <input
                         id="PN"
                         name="phone"
@@ -225,7 +225,7 @@
 
                 <!-- Password -->
                 <div class="relative pb-3">
-                    <label for="PASS" class="text-[10px] text-[#2F4B5D]">Password <span class="text-red-500">*</span></label>
+                    <label for="PASS" class="text-[10px] text-[#2F4B5D]">Password</label>
                     <input
                         id="PASS"
                         name="password"
@@ -241,7 +241,7 @@
 
                 <!-- Confirm Password -->
                 <div class="relative pb-3">
-                    <label for="CPASS" class="text-[10px] text-[#2F4B5D]">Confirm Password <span class="text-red-500">*</span></label>
+                    <label for="CPASS" class="text-[10px] text-[#2F4B5D]">Confirm Password</label>
                     <input
                         id="CPASS"
                         name="confirmPassword"
