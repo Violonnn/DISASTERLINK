@@ -1,66 +1,278 @@
-<div class=" min-h-screen flex flex-col items-center justify-center relative cursor-default">
-    <!-- bg-[linear-gradient(130deg,#2F4B5D_10%,#1B2E3A_100%)] -->
+<script lang="ts">
+    import { supabase } from '$lib/supabase';
+    import { goto } from '$app/navigation';
+
+    /* ── Form field state ── */
+    let firstName = $state('');
+    let lastName = $state('');
+    let email = $state('');
+    let phone = $state('');
+    let password = $state('');
+    let confirmPassword = $state('');
+
+    /* ── UI state ── */
+    let isSubmitting = $state(false);
+    let errorMessage = $state('');
+    let successMessage = $state('');
+    let showErrors = $state(false);
+
+    /* ── Reactive validation — re-evaluates whenever any field changes ── */
+    let errors = $derived({
+        firstName:
+            firstName.trim() === '' ? 'First name is required' : '',
+        lastName:
+            lastName.trim() === '' ? 'Last name is required' : '',
+        email:
+            email.trim() === ''
+                ? 'Email is required'
+                : !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+                    ? 'Enter a valid email address'
+                    : '',
+        phone:
+            phone.trim() === ''
+                ? 'Contact number is required'
+                : !/^(09\d{9}|\+639\d{9})$/.test(phone.replace(/[\s-]/g, ''))
+                    ? 'Enter a valid PH number (09XXXXXXXXX)'
+                    : '',
+        password:
+            password === ''
+                ? 'Password is required'
+                : password.length < 6
+                    ? 'Password must be at least 6 characters'
+                    : '',
+        confirmPassword:
+            confirmPassword === ''
+                ? 'Please confirm your password'
+                : confirmPassword !== password
+                    ? 'Passwords do not match'
+                    : ''
+    });
+
+    /* True only when every validation message is an empty string */
+    let isFormValid = $derived(
+        Object.values(errors).every((msg) => msg === '')
+    );
+
+    /* ── Signup handler — calls Supabase Auth then redirects ── */
+    async function handleSignup(event: SubmitEvent) {
+        event.preventDefault();
+        showErrors = true;
+
+        if (!isFormValid) return;
+
+        isSubmitting = true;
+        errorMessage = '';
+
+        /* Step 1: Check if the phone number is already registered */
+        const { data: phoneTaken, error: phoneError } = await supabase
+            .rpc('is_phone_taken', { check_phone: phone.trim() });
+
+        if (phoneError) {
+            isSubmitting = false;
+            errorMessage = 'Unable to verify phone number. Please try again.';
+            return;
+        }
+
+        if (phoneTaken) {
+            isSubmitting = false;
+            errorMessage = 'This phone number is already registered.';
+            return;
+        }
+
+        /* Step 2: Create the auth account */
+        const { data, error } = await supabase.auth.signUp({
+            email: email.trim(),
+            password,
+            options: {
+                data: {
+                    first_name: firstName.trim(),
+                    last_name: lastName.trim(),
+                    contact_phone: phone.trim(),
+                    role: 'resident'
+                },
+                emailRedirectTo: `${window.location.origin}/login`
+            }
+        });
+
+        isSubmitting = false;
+
+        if (error) {
+            errorMessage = error.message;
+            return;
+        }
+
+        /* Step 3: Detect duplicate email — Supabase returns an empty
+           identities array when the email is already registered */
+        if (data.user?.identities?.length === 0) {
+            errorMessage = 'This email is already registered. Please log in instead.';
+            return;
+        }
+
+        successMessage =
+            'Account created! Please check your email to confirm your account.';
+
+        setTimeout(() => goto('/login'), 3500);
+    }
+</script>
+
+<div class="min-h-screen flex flex-col items-center justify-center relative cursor-default">
     <img src="/imgs/landing2.png" alt="" class="absolute inset-0 w-full h-full opacity-70 object-contain pointer-events-none" />
 
+    <!-- Top navigation bar -->
     <div class="fixed top-0 left-0 w-full bg-white/3-0 shadow-md z-50">
         <div class="max-w-screen-xl mx-auto flex justify-between items-center h-12 px-4 md:px-4">
             <a href="/" class="relative text-xs md:text-sm text-gray-500" style="font-family: 'Playfair Display SC', serif">DISASTERLINK</a>
             <div class="flex items-center space-x-3 md:space-x-6">
-            <a href="../login" class="bg-[#768391] text-black rounded px-4 md:px-5 text-xs text-white md:text-sm hover:bg-gray-300 transition p-1 hover:cursor-pointer">Log In</a>
+                <a href="/login" class="bg-[#768391] text-black rounded px-4 md:px-5 text-xs text-white md:text-sm hover:bg-gray-300 transition p-1 hover:cursor-pointer">Log In</a>
             </div>
-        </div> 
+        </div>
     </div>
 
-    <form class="relative bg-[#2F4B5D]/4 w-170 h-100 grid place-content-center rounded-[16px] shadow-lg">
-        <div class="relative w-full flex flex-col items-center ">
-            <h1 class="relative text-[#2F4B5D] text-2xl font-bold">Create your DisasterLink account</h1>
-            <span class="relative top-5 text-[#2F4B5D] font-light -mt-5 text-sm ">Access features to connect effectively.</span>
-            <div class="relative mt-20 grid grid-cols-1 md:grid-cols-3 w-full md:w-140 place-items-center"> 
-                <!-- <p class="text-xs w-full md:col-span-3 p-2">Name</p> -->
-                 <div class="relative -mt-10">
-                    <label for="FN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">First Name</label>
-                    <input id="FN" type="text" placeholder="Enter your First Name" class="w-45 border p-1 rounded-lg mb-2 text-xs text-[#0C212F]" />
-                 </div>
-                 <div class="relative -mt-10">
-                    <label for="LN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">Last Name</label>
-                    <input id="LN" type="text" placeholder="Enter your Last Name" class="w-45 border p-1 rounded-lg mb-2 text-xs text-[#0C212F]" />
-                 </div>
-                 <div class="relative -mt-10">
-                    <label for="UN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">Username</label>
-                    <input id="UN" type="text" placeholder="Enter your Username" class="w-45 border p-1 rounded-lg mb-2 text-xs text-[#0C212F]" />
-                 </div>
-                 <div class="relative -mt-2 md:col-span-2 w-full text-left ml-1">
-                    <label for="EM" class="text-[10px] text-[#2F4B5D] ">Email Address</label>
-                    <input id="EM" type="text" placeholder="Enter your Email" class="md:col-span-2 w-91 border p-1 rounded-lg mb-2 text-xs text-[#0C212F]" /> 
+    <!-- Signup form card -->
+    <form
+        onsubmit={handleSignup}
+        novalidate
+        class="relative bg-[#2F4B5D]/4 w-full max-w-[680px] px-6 py-10 grid place-content-center rounded-[16px] shadow-lg"
+    >
+        <div class="relative w-full flex flex-col items-center">
+            <h1 class="relative text-[#2F4B5D] text-2xl font-bold text-center">Create your DisasterLink account</h1>
+            <span class="relative text-[#2F4B5D] font-light text-sm mt-1">Access features to connect effectively.</span>
+
+            <!-- Success banner — shown after signup completes -->
+            {#if successMessage}
+                <div class="w-full md:w-140 mt-4 bg-green-100 border border-green-400 text-green-800 text-xs rounded-lg px-4 py-3 text-center">
+                    {successMessage}
+                    <p class="mt-1 text-[10px] text-green-600">Redirecting to login…</p>
                 </div>
-                <div class="relative -mt-2 ">
-                    <label for="PN" class="text-[10px] text-[#2F4B5D] ">Contact Number</label>
-                    <input id="PN"type="telephone" placeholder="Enter your Number" class="w-45 border p-1 rounded-lg mb-2 text-xs text-[#0C212F]" />
+            {/if}
+
+            <!-- Error banner — shown when Supabase returns an error -->
+            {#if errorMessage}
+                <div class="w-full md:w-140 mt-4 bg-red-100 border border-red-400 text-red-800 text-xs rounded-lg px-4 py-3 text-center">
+                    {errorMessage}
                 </div>
-                <div class="relative -mt-2 ">
-                    <label for="PASS" class="text-[10px] text-[#2F4B5D] ">Password</label>
-                    <input id="PASS" type="Password" placeholder="Enter Password" class="w-45 border p-1 rounded-lg mb-2 text-xs text-[#0C212F]" />
+            {/if}
+
+            <!-- Input fields grid -->
+            <div class="relative mt-8 grid grid-cols-1 md:grid-cols-3 w-full md:w-140 place-items-center gap-y-1">
+
+                <!-- First Name -->
+                <div class="relative pb-3">
+                    <label for="FN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">First Name <span class="text-red-500">*</span></label>
+                    <input
+                        id="FN"
+                        name="firstName"
+                        type="text"
+                        placeholder="Enter your First Name"
+                        bind:value={firstName}
+                        class="w-45 border p-1 rounded-lg text-xs text-[#0C212F]"
+                    />
+                    {#if showErrors && errors.firstName}
+                        <p class="absolute bottom-0 left-1 text-[9px] text-red-500 leading-none">{errors.firstName}</p>
+                    {/if}
                 </div>
-                <input type="Password" placeholder="Confirm password" class="w-45 border p-1 rounded-lg mb-2 text-xs text-[#0C212F] mt-4" />
-                 
-                
-                <button class="w-10 md:w-25 h-10 md:h-8 bg-gray-800 text-xs md:text-sm text-white rounded col-start-3 flex items-center justify-center">Next</button>
+
+                <!-- Last Name -->
+                <div class="relative pb-3">
+                    <label for="LN" class="text-[10px] text-[#2F4B5D] md:col-span-2 w-full text-left ml-1">Last Name <span class="text-red-500">*</span></label>
+                    <input
+                        id="LN"
+                        name="lastName"
+                        type="text"
+                        placeholder="Enter your Last Name"
+                        bind:value={lastName}
+                        class="w-45 border p-1 rounded-lg text-xs text-[#0C212F]"
+                    />
+                    {#if showErrors && errors.lastName}
+                        <p class="absolute bottom-0 left-1 text-[9px] text-red-500 leading-none">{errors.lastName}</p>
+                    {/if}
+                </div>
+
+                <!-- Empty cell to keep the 3-column grid aligned -->
+                <div class="hidden md:block"></div>
+
+                <!-- Email Address (spans 2 columns on md+) -->
+                <div class="relative pb-3 md:col-span-2 w-full text-left ml-1">
+                    <label for="EM" class="text-[10px] text-[#2F4B5D]">Email Address <span class="text-red-500">*</span></label>
+                    <input
+                        id="EM"
+                        name="email"
+                        type="email"
+                        placeholder="Enter your Email"
+                        bind:value={email}
+                        class="md:col-span-2 w-91 border p-1 rounded-lg text-xs text-[#0C212F]"
+                    />
+                    {#if showErrors && errors.email}
+                        <p class="absolute bottom-0 left-1 text-[9px] text-red-500 leading-none">{errors.email}</p>
+                    {/if}
+                </div>
+
+                <!-- Contact Number -->
+                <div class="relative pb-3">
+                    <label for="PN" class="text-[10px] text-[#2F4B5D]">Contact Number <span class="text-red-500">*</span></label>
+                    <input
+                        id="PN"
+                        name="phone"
+                        type="tel"
+                        placeholder="09XXXXXXXXX"
+                        bind:value={phone}
+                        class="w-45 border p-1 rounded-lg text-xs text-[#0C212F]"
+                    />
+                    {#if showErrors && errors.phone}
+                        <p class="absolute bottom-0 left-1 text-[9px] text-red-500 leading-none">{errors.phone}</p>
+                    {/if}
+                </div>
+
+                <!-- Password -->
+                <div class="relative pb-3">
+                    <label for="PASS" class="text-[10px] text-[#2F4B5D]">Password <span class="text-red-500">*</span></label>
+                    <input
+                        id="PASS"
+                        name="password"
+                        type="password"
+                        placeholder="Min 6 characters"
+                        bind:value={password}
+                        class="w-45 border p-1 rounded-lg text-xs text-[#0C212F]"
+                    />
+                    {#if showErrors && errors.password}
+                        <p class="absolute bottom-0 left-1 text-[9px] text-red-500 leading-none">{errors.password}</p>
+                    {/if}
+                </div>
+
+                <!-- Confirm Password -->
+                <div class="relative pb-3">
+                    <label for="CPASS" class="text-[10px] text-[#2F4B5D]">Confirm Password <span class="text-red-500">*</span></label>
+                    <input
+                        id="CPASS"
+                        name="confirmPassword"
+                        type="password"
+                        placeholder="Re-enter password"
+                        bind:value={confirmPassword}
+                        class="w-45 border p-1 rounded-lg text-xs text-[#0C212F]"
+                    />
+                    {#if showErrors && errors.confirmPassword}
+                        <p class="absolute bottom-0 left-1 text-[9px] text-red-500 leading-none">{errors.confirmPassword}</p>
+                    {/if}
+                </div>
+
+                <!-- Submit button -->
+                <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    class="w-full md:w-25 h-10 md:h-8 bg-gray-800 text-xs md:text-sm text-white rounded col-start-1 md:col-start-3 flex items-center justify-center mt-3 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 transition-colors"
+                >
+                    {#if isSubmitting}
+                        <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                        </svg>
+                    {:else}
+                        Sign Up
+                    {/if}
+                </button>
             </div>
         </div>
 
-        <div class="relative grid grid-cols-1 md:grid-cols-1 gap-4 mt-5 ">
-            <p class="text-xs w-full md:col-start-1 justify-self-center text-center font-light">OR</p>
-                <button class="flex text-sm card p-4 shadow-sm bg-base-200 w-70 h-15 rounded justify-self-center justify-items-center gap-10 bg-[#2F4B5D]/50">
-                    <svg class="w-5 h-5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#1B2E3A"/>
-                        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#1B2E3A"/>
-                        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#1B2E3A"/>
-                        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 1.16-4.53z" fill="#1B2E3A"/>
-                    </svg>
-                    <span class="text-slate-700 font-medium">Continue with Google</span>
-                </button>
-            <!-- <div class=" text-sm card p-4 shadow-sm bg-base-200 w-100 h-15 rounded justify-self-center justify-items-center grid place-items-center">Continue with Google</div> -->
-        </div>
+       
     </form>
 </div>
-

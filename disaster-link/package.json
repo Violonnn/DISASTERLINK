@@ -4,6 +4,7 @@
 	"version": "0.0.1",
 	"type": "module",
 	"scripts": {
+		"clip-flood": "node scripts/clip-flood-hazard.js",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
@@ -26,6 +27,7 @@
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.14.0",
 		"globals": "^17.1.0",
+		"mapshaper": "^0.6.113",
 		"prettier": "^3.8.1",
 		"prettier-plugin-svelte": "^3.4.1",
 		"prettier-plugin-tailwindcss": "^0.7.2",
@@ -41,6 +43,9 @@
 		"@supabase/auth-ui-svelte": "^0.2.9",
 		"@supabase/ssr": "^0.8.0",
 		"@supabase/supabase-js": "^2.95.3",
-		"daisyui": "^5.5.17"
+		"@types/leaflet-draw": "^1.0.13",
+		"daisyui": "^5.5.17",
+		"leaflet": "^1.9.4",
+		"leaflet-draw": "^1.0.4"
 	}
 }

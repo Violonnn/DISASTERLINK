@@ -1,0 +1,125 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "South Road Properties (SRP)",
+        "risk_level": "high",
+        "description": "Reclaimed coastal land directly exposed to storm surge"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8920, 10.2850],
+          [123.8960, 10.2840],
+          [123.8975, 10.2750],
+          [123.8960, 10.2690],
+          [123.8920, 10.2700],
+          [123.8905, 10.2770],
+          [123.8920, 10.2850]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Pasil – Suba Fish Port",
+        "risk_level": "high",
+        "description": "Low-lying port area highly vulnerable to surge inundation"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8970, 10.2930],
+          [123.9010, 10.2920],
+          [123.9020, 10.2880],
+          [123.9000, 10.2855],
+          [123.8965, 10.2865],
+          [123.8960, 10.2900],
+          [123.8970, 10.2930]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Mambaling – Alaska Coast",
+        "risk_level": "moderate",
+        "description": "Coastal residential strip with moderate surge exposure"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8850, 10.2870],
+          [123.8900, 10.2860],
+          [123.8910, 10.2810],
+          [123.8890, 10.2780],
+          [123.8845, 10.2790],
+          [123.8835, 10.2835],
+          [123.8850, 10.2870]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Mandaue – Subangdaku Coast",
+        "risk_level": "moderate",
+        "description": "Northern coastal industrial zone with partial sea-wall protection"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.9340, 10.3420],
+          [123.9400, 10.3400],
+          [123.9420, 10.3340],
+          [123.9395, 10.3300],
+          [123.9340, 10.3315],
+          [123.9320, 10.3370],
+          [123.9340, 10.3420]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Pier Area – Cebu Port",
+        "risk_level": "low",
+        "description": "Commercially reinforced port zone with engineered defenses"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.9040, 10.3020],
+          [123.9090, 10.3005],
+          [123.9100, 10.2960],
+          [123.9080, 10.2935],
+          [123.9035, 10.2945],
+          [123.9025, 10.2985],
+          [123.9040, 10.3020]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Talisay – Bulacao Coast",
+        "risk_level": "low",
+        "description": "Southern coastal fringe of Metro Cebu with low-density exposure"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8870, 10.2650],
+          [123.8920, 10.2640],
+          [123.8935, 10.2580],
+          [123.8910, 10.2550],
+          [123.8860, 10.2560],
+          [123.8850, 10.2610],
+          [123.8870, 10.2650]
+        ]]
+      }
+    }
+  ]
+}
