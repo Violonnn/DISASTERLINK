@@ -163,7 +163,7 @@
                 <div class="flex flex-col items-end">
                     <form onsubmit={handleEmailSubmit} novalidate class="flex flex-col mt-10">
                         <div class="relative pb-3">
-                            <label for="EM" class="text-[10px] text-[#2F4B5D] w-full text-left ml-1">Email Address <span class="text-red-500">*</span></label>
+                            <label for="EM" class="text-[10px] text-[#2F4B5D] w-full text-left ml-1">Email Address</label>
                             <div class="relative flex items-center">
                                 <div class="absolute left-2.5 flex items-center pointer-events-none">
                                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" class="w-3.5 h-3.5">
@@ -236,7 +236,7 @@
 
                         <!-- New Password -->
                         <div class="relative pb-3">
-                            <label for="NEWPASS" class="text-[10px] text-[#2F4B5D] w-full text-left ml-1">New Password <span class="text-red-500">*</span></label>
+                            <label for="NEWPASS" class="text-[10px] text-[#2F4B5D] w-full text-left ml-1">New Password</label>
                             <div class="relative flex items-center">
                                 <div class="absolute left-2.5 flex items-center pointer-events-none">
                                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" class="w-3.5 h-3.5">
@@ -259,7 +259,7 @@
 
                         <!-- Confirm Password -->
                         <div class="relative pb-3 mt-2">
-                            <label for="CPASS" class="text-[10px] text-[#2F4B5D] w-full text-left ml-1">Confirm Password <span class="text-red-500">*</span></label>
+                            <label for="CPASS" class="text-[10px] text-[#2F4B5D] w-full text-left ml-1">Confirm Password</label>
                             <div class="relative flex items-center">
                                 <div class="absolute left-2.5 flex items-center pointer-events-none">
                                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" class="w-3.5 h-3.5">
