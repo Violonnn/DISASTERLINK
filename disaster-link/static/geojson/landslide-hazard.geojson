@@ -1,0 +1,105 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Busay – Babag Ridge",
+        "risk_level": "high",
+        "description": "Steep mountain ridge with unstable slopes above Cebu City"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8590, 10.3460],
+          [123.8680, 10.3430],
+          [123.8710, 10.3360],
+          [123.8680, 10.3300],
+          [123.8600, 10.3320],
+          [123.8570, 10.3390],
+          [123.8590, 10.3460]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Transcentral Highway Corridor",
+        "risk_level": "high",
+        "description": "Road-cut slopes along the Transcentral Highway at high elevation"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8480, 10.3540],
+          [123.8560, 10.3520],
+          [123.8580, 10.3460],
+          [123.8550, 10.3420],
+          [123.8480, 10.3440],
+          [123.8460, 10.3490],
+          [123.8480, 10.3540]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Upper Lahug – Nivel Hills",
+        "risk_level": "moderate",
+        "description": "Rolling hillside residential area with moderate slope instability"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8740, 10.3260],
+          [123.8810, 10.3240],
+          [123.8830, 10.3185],
+          [123.8800, 10.3150],
+          [123.8740, 10.3165],
+          [123.8720, 10.3210],
+          [123.8740, 10.3260]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Talamban Foothills",
+        "risk_level": "moderate",
+        "description": "Foothills between Talamban and the central highlands"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8800, 10.3550],
+          [123.8880, 10.3530],
+          [123.8900, 10.3475],
+          [123.8870, 10.3440],
+          [123.8800, 10.3455],
+          [123.8780, 10.3505],
+          [123.8800, 10.3550]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Guadalupe Heights",
+        "risk_level": "low",
+        "description": "Gentle upland slopes with occasional soil creep during heavy rain"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.8780, 10.3130],
+          [123.8840, 10.3115],
+          [123.8860, 10.3065],
+          [123.8835, 10.3030],
+          [123.8780, 10.3045],
+          [123.8760, 10.3085],
+          [123.8780, 10.3130]
+        ]]
+      }
+    }
+  ]
+}

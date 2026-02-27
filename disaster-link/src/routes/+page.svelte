@@ -19,7 +19,7 @@
 
 
   <div class="flex space-x-4">
-    <a href="general-page" class="relative left-5 bg-[#768391] text-sm text-black rounded px-5 py-3 px-25 top-10 shadow-md hover:cursor-pointer">Locate My Location</a>
+    <a href="guest-dashboard" class="relative left-5 bg-[#768391] text-sm text-black rounded px-5 py-3 px-25 top-10 shadow-md hover:cursor-pointer">Locate My Location</a>
   </div>
 
   <!-- Small info cards (optional) -->

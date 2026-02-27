@@ -1,0 +1,105 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Minglanilla Poblacion Lowland",
+        "risk_level": "high",
+        "description": "Low-lying area near town center prone to flooding"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.778, 10.244],
+          [123.785, 10.243],
+          [123.787, 10.237],
+          [123.782, 10.233],
+          [123.776, 10.235],
+          [123.775, 10.241],
+          [123.778, 10.244]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Tulay Creek Basin",
+        "risk_level": "high",
+        "description": "Creek-side floodplain along Tulay"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.772, 10.252],
+          [123.779, 10.250],
+          [123.781, 10.245],
+          [123.777, 10.241],
+          [123.770, 10.243],
+          [123.769, 10.248],
+          [123.772, 10.252]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Coastal Zone Minglanilla",
+        "risk_level": "moderate",
+        "description": "Coastal lowland with storm surge exposure"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.858, 10.265],
+          [123.868, 10.263],
+          [123.872, 10.257],
+          [123.868, 10.252],
+          [123.858, 10.254],
+          [123.855, 10.260],
+          [123.858, 10.265]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Camp 7 – Tunlod Lowland",
+        "risk_level": "moderate",
+        "description": "Inland catchment area with periodic flooding"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.795, 10.278],
+          [123.805, 10.276],
+          [123.808, 10.270],
+          [123.802, 10.266],
+          [123.793, 10.268],
+          [123.791, 10.274],
+          [123.795, 10.278]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Upland Minglanilla",
+        "risk_level": "low",
+        "description": "Gentle slopes with minor drainage issues"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [123.750, 10.300],
+          [123.760, 10.298],
+          [123.763, 10.292],
+          [123.758, 10.288],
+          [123.748, 10.290],
+          [123.747, 10.296],
+          [123.750, 10.300]
+        ]]
+      }
+    }
+  ]
+}
