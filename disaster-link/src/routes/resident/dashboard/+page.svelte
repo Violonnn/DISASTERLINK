@@ -1,156 +1,120 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
-    import { supabase } from '$lib/supabase';
-    import { goto } from '$app/navigation';
+  /**
+   * Resident Dashboard — authenticated map view for residents.
+   * Shows the full map with barangay status layers (read-only).
+   * Residents can view barangay profiles but cannot set status or provide assistance.
+   */
+  import { onMount } from 'svelte';
+  import { supabase } from '$lib/supabase';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
+  import MapDashboard from '$lib/components/MapDashboard.svelte';
+  import { clearResidentLocation } from '$lib/services/resident-location-session';
 
-    /* ── Dropdown menu state ── */
-    let openMenu = $state<string | null>(null);
+  let isLoading = $state(true);
+  let residentUserId = $state('');
+  let residentBarangayId = $state('');
+  let userLabel = $state('Resident');
+  let userInitials = $state('');
+  let residentBarangayName = $state('');
+  /* Residents that can log in are treated as verified */
+  let isEmailVerified = $state(true);
 
-    /* ── Session / profile state ── */
-    let isLoading = $state(true);
-    let profile = $state<{ first_name: string; last_name: string; role: string } | null>(null);
+  const settingsIcon = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" style="width:16px;height:16px"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>`;
 
-    /* Toggle a dropdown; close if already open */
-    function toggle(name: string) {
-        openMenu = openMenu === name ? null : name;
+  const logoutIcon = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" style="width:16px;height:16px"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15M12 9l-3 3m0 0 3 3m-3-3h12.75" /></svg>`;
+
+  /* Sign out the current resident and navigate to login */
+  async function handleLogout() {
+    // Clear any saved resident location when logging out.
+    clearResidentLocation();
+    await supabase.auth.signOut();
+    goto('/login');
+  }
+
+  /* Profile dropdown: Profile (settings page) and Logout */
+  const pfpMenuItems = [
+    { label: 'Profile', href: '/resident/settings', icon: settingsIcon },
+    { label: 'Logout',  action: handleLogout,        icon: logoutIcon   }
+  ];
+
+  /* Hamburger menu is intentionally empty for resident mode.
+     Feed and Map are now in the toolbar; Map Legend is added internally by MapDashboard. */
+  const hamburgerMenuItems: { label: string; href?: string; action?: () => void; icon?: string }[] = [];
+
+  /* Read initial actions from the URL so the map can react (e.g. open report, focus a report). */
+  const initialResidentAction = (() => {
+    const action = $page.url.searchParams.get('action');
+    return action === 'openReport' ? 'openReport' : null;
+  })() as 'openReport' | null;
+
+  const initialReportIdToFocus = (() => {
+    const id = $page.url.searchParams.get('focusReportId');
+    return id && id.length > 0 ? id : null;
+  })() as string | null;
+
+  onMount(async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+
+    if (!session) {
+      goto('/login');
+      return;
     }
 
-    /* Close any open dropdown (backdrop click) */
-    function close() {
-        openMenu = null;
+    /* Fetch the resident's profile */
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('first_name, last_name, role, barangay_id')
+      .eq('id', session.user.id)
+      .single();
+
+    if (!profile || profile.role !== 'resident') {
+      await supabase.auth.signOut();
+      goto('/login');
+      return;
     }
 
-    /* Sign the user out and redirect to login */
-    async function handleSignout() {
-        await supabase.auth.signOut();
-        goto('/login');
+    residentUserId = session.user.id;
+
+    const fn = profile.first_name ?? '';
+    const ln = profile.last_name ?? '';
+    userLabel    = [fn, ln].filter(Boolean).join(' ') || 'Resident';
+    userInitials = (fn ? fn[0] : '') + (ln ? ln[0] : '') || 'R';
+
+    /* If the resident has a barangay assigned, fetch its name and ID for reporting */
+    if (profile.barangay_id) {
+      residentBarangayId = profile.barangay_id;
+      const { data: barangay } = await supabase
+        .from('barangays')
+        .select('name')
+        .eq('id', profile.barangay_id)
+        .single();
+      residentBarangayName = barangay?.name ?? '';
     }
 
-    /* On page load: verify session exists, fetch profile, guard access */
-    onMount(async () => {
-        try {
-            const { data: { session } } = await supabase.auth.getSession();
-
-            if (!session) {
-                goto('/login');
-                return;
-            }
-
-            const { data } = await supabase
-                .from('profiles')
-                .select('first_name, last_name, role')
-                .eq('id', session.user.id)
-                .single();
-
-            if (!data || data.role !== 'resident') {
-                await supabase.auth.signOut();
-                goto('/login');
-                return;
-            }
-
-            profile = data;
-        } finally {
-            isLoading = false;
-        }
-    });
-
-    /* Menu items with click handlers — Logout calls handleSignout */
-    const menuItems = [
-        { label: 'Create Report', action: () => {} },
-        { label: 'Feed',          action: () => {} },
-        { label: 'Map',           action: () => {} },
-        { label: 'Logout',        action: handleSignout }
-    ];
+    isLoading = false;
+  });
 </script>
 
-<!-- Show nothing while verifying session -->
 {#if isLoading}
-    <div class="min-h-screen grid place-items-center">
-        <svg class="animate-spin h-8 w-8 text-[#2F4B5D]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-        </svg>
-    </div>
+  <div class="min-h-screen grid place-items-center bg-[#0C212F]">
+    <svg class="animate-spin h-8 w-8 text-white/70" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+    </svg>
+  </div>
 {:else}
-
-<div class="fixed top-0 left-0 w-full bg-white/3-0 shadow-md z-50">
-    <div class="max-w-screen-xl mx-auto flex justify-between items-center h-12 px-4 md:px-4">
-
-        <!-- Backdrop to close on outside click -->
-        {#if openMenu}
-            <button class="fixed inset-0 z-10 cursor-default" onclick={close} aria-label="Close menu"></button>
-        {/if}
-
-        <div class="flex items-center justify-evenly space-x-3 md:space-x-6 bg-[#768391]/10 rounded-[20px] relative z-20 w-35">
-
-            <!-- PFP -->
-            <div class="relative">
-                <button
-                    class="bg-white rounded-[50px] p-1 hover:cursor-pointer outline text-xs"
-                    onclick={() => toggle('pfp')}
-                >
-                    {profile?.first_name?.[0]}{profile?.last_name?.[0]}
-                </button>
-
-                {#if openMenu === 'pfp'}
-                    <div class="absolute left-0 mt-4 w-25 md:w-40 bg-white rounded-xl shadow-lg border border-gray-100 p-2 z-30">
-                        <p class="px-3 py-1 text-[10px] text-gray-400">{profile?.first_name} {profile?.last_name}</p>
-                        <div class="px-3 py-2 hover:bg-gray-50 rounded-lg cursor-pointer text-xs md:text-sm text-[#1B2E3A]">Settings</div>
-                    </div>
-                {/if}
-            </div>
-
-            <!-- Notifs -->
-            <div class="relative">
-                <button class="hover:cursor-pointer" onclick={() => toggle('notifs')} aria-label="Notifications">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" class="w-6 h-6">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
-                    </svg>
-                </button>
-
-                {#if openMenu === 'notifs'}
-                    <div class="absolute -left-14 mt-5 w-60 md:w-72 bg-white rounded-xl shadow-lg border border-gray-100 p-2 z-30">
-                        {#each [1, 2, 3, 4, 5] as _}
-                            <div class="px-3 py-3 hover:bg-gray-50 rounded-lg cursor-pointer border-b border-gray-50 last:border-0">
-                                <div class="h-4 bg-gray-100 rounded w-3/4 mb-1"></div>
-                                <div class="h-3 bg-gray-50 rounded w-1/2"></div>
-                            </div>
-                        {/each}
-                    </div>
-                {/if}
-            </div>
-
-            <!-- Menu (hamburger) -->
-            <div class="relative">
-                <button class="hover:cursor-pointer" onclick={() => toggle('menu')} aria-label="Menu">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" class="w-6 h-6">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-                    </svg>
-                </button>
-
-                {#if openMenu === 'menu'}
-                    <div class="absolute -left-26 mt-5 bg-white rounded-xl shadow-lg border border-gray-100 p-2 z-30">
-                        <div class="grid grid-cols-4 gap-1 min-w-[280px]">
-                            {#each menuItems as item}
-                                <button
-                                    class="flex flex-col items-center px-3 py-4 hover:bg-gray-50 rounded-lg cursor-pointer text-center"
-                                    onclick={item.action}
-                                >
-                                    <div class="w-8 h-8 bg-gray-100 rounded-full mb-2"></div>
-                                    <span class="text-xs text-[#1B2E3A] font-medium">{item.label}</span>
-                                </button>
-                            {/each}
-                        </div>
-                    </div>
-                {/if}
-            </div>
-
-        </div>
-
-        <h1 class="relative text-[0px] md:text-sm text-gray-500" style="font-family: 'Playfair Display SC', serif">DISASTERLINK</h1>
-        <p class="text-black text-xs md:sm font-medium hover:underline hover:cursor-pointer">Location: Minglanilla</p>
-
-    </div>
-</div>
-
+  <MapDashboard
+    mode="resident"
+    {userLabel}
+    {userInitials}
+    {pfpMenuItems}
+    {hamburgerMenuItems}
+    {residentUserId}
+    {residentBarangayId}
+    {residentBarangayName}
+    {isEmailVerified}
+      {initialResidentAction}
+      {initialReportIdToFocus}
+  />
 {/if}

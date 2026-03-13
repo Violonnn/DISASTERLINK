@@ -1,22 +1,22 @@
 <script lang="ts">
-    import { supabase } from '$lib/supabase';
     import { goto } from '$app/navigation';
+    import { supabase } from '$lib/supabase';
 
     /* ── Form field state ── */
-    let firstName = $state('');
-    let lastName = $state('');
-    let email = $state('');
-    let phone = $state('');
-    let password = $state('');
+    let firstName       = $state('');
+    let lastName        = $state('');
+    let email           = $state('');
+    let phone           = $state('');
+    let password        = $state('');
     let confirmPassword = $state('');
 
     /* ── UI state ── */
-    let isSubmitting = $state(false);
-    let errorMessage = $state('');
+    let isSubmitting   = $state(false);
+    let errorMessage   = $state('');
     let successMessage = $state('');
-    let showErrors = $state(false);
+    let showErrors     = $state(false);
 
-    /* ── Reactive validation — re-evaluates whenever any field changes ── */
+    /* ── Reactive client-side validation ── */
     let errors = $derived({
         firstName:
             firstName.trim() === '' ? 'First name is required' : '',
@@ -48,70 +48,76 @@
                     : ''
     });
 
-    /* True only when every validation message is an empty string */
     let isFormValid = $derived(
         Object.values(errors).every((msg) => msg === '')
     );
 
-    /* ── Signup handler — calls Supabase Auth then redirects ── */
-    async function handleSignup(event: SubmitEvent) {
+    async function handleSubmit(event: SubmitEvent) {
         event.preventDefault();
         showErrors = true;
 
-        if (!isFormValid) return;
+        if (!isFormValid) {
+            return;
+        }
 
         isSubmitting = true;
         errorMessage = '';
+        successMessage = '';
 
-        /* Step 1: Check if the phone number is already registered */
-        const { data: phoneTaken, error: phoneError } = await supabase
-            .rpc('is_phone_taken', { check_phone: phone.trim() });
+        try {
+            // Server-side uniqueness via RPC
+            const { data: phoneTakenResult, error: phoneError } = await supabase
+                .rpc('is_phone_taken', { check_phone: phone.trim() });
 
-        if (phoneError) {
-            isSubmitting = false;
-            errorMessage = 'Unable to verify phone number. Please try again.';
-            return;
-        }
-
-        if (phoneTaken) {
-            isSubmitting = false;
-            errorMessage = 'This phone number is already registered.';
-            return;
-        }
-
-        /* Step 2: Create the auth account */
-        const { data, error } = await supabase.auth.signUp({
-            email: email.trim(),
-            password,
-            options: {
-                data: {
-                    first_name: firstName.trim(),
-                    last_name: lastName.trim(),
-                    contact_phone: phone.trim(),
-                    role: 'resident'
-                },
-                emailRedirectTo: `${window.location.origin}/login`
+            if (phoneError) {
+                const msg = (phoneError.message ?? '').toLowerCase();
+                if (msg.includes('does not exist') || msg.includes('could not find')) {
+                    errorMessage =
+                        'Phone check is not set up. Run the Supabase migration that defines public.is_phone_taken(check_phone text), then try again.';
+                    isSubmitting = false;
+                    return;
+                }
+                console.error('is_phone_taken RPC error:', phoneError);
+            } else if (typeof phoneTakenResult === 'boolean' && phoneTakenResult) {
+                errorMessage = 'This phone number is already registered.';
+                isSubmitting = false;
+                return;
             }
-        });
 
-        isSubmitting = false;
+            const { error: signUpError } = await supabase.auth.signUp({
+                email: email.trim(),
+                password,
+                options: {
+                    data: {
+                        first_name: firstName.trim(),
+                        last_name: lastName.trim(),
+                        contact_phone: phone.trim(),
+                        phone: phone.trim(),
+                        role: 'resident'
+                    },
+                    emailRedirectTo: `${window.location.origin}/login?confirmed=1`
+                }
+            });
 
-        if (error) {
-            errorMessage = error.message;
-            return;
+            if (signUpError) {
+                const msg = signUpError.message.toLowerCase();
+                if (msg.includes('already registered') || msg.includes('already been registered')) {
+                    errorMessage = 'This email is already registered. Please log in instead.';
+                    isSubmitting = false;
+                    return;
+                }
+                errorMessage = signUpError.message || 'Signup failed. Please try again.';
+                isSubmitting = false;
+                return;
+            }
+
+            await goto(`/signup/verify-email?email=${encodeURIComponent(email.trim())}`);
+        } catch (err) {
+            console.error('Resident signup client error:', err);
+            errorMessage = 'Signup failed. Please check your connection and try again.';
+        } finally {
+            isSubmitting = false;
         }
-
-        /* Step 3: Detect duplicate email — Supabase returns an empty
-           identities array when the email is already registered */
-        if (data.user?.identities?.length === 0) {
-            errorMessage = 'This email is already registered. Please log in instead.';
-            return;
-        }
-
-        successMessage =
-            'Account created! Please check your email to confirm your account.';
-
-        setTimeout(() => goto('/login'), 3500);
     }
 </script>
 
@@ -130,7 +136,7 @@
 
     <!-- Signup form card -->
     <form
-        onsubmit={handleSignup}
+        onsubmit={handleSubmit}
         novalidate
         class="relative bg-[#2F4B5D]/4 w-full max-w-[680px] px-6 py-10 grid place-content-center rounded-[16px] shadow-lg"
     >
@@ -138,15 +144,14 @@
             <h1 class="relative text-[#2F4B5D] text-2xl font-bold text-center">Create your DisasterLink account</h1>
             <span class="relative text-[#2F4B5D] font-light text-sm mt-1">Access features to connect effectively.</span>
 
-            <!-- Success banner — shown after signup completes -->
+            <!-- Success banner — shown after signup before redirect to login -->
             {#if successMessage}
                 <div class="w-full md:w-140 mt-4 bg-green-100 border border-green-400 text-green-800 text-xs rounded-lg px-4 py-3 text-center">
                     {successMessage}
-                    <p class="mt-1 text-[10px] text-green-600">Redirecting to login…</p>
                 </div>
             {/if}
 
-            <!-- Error banner — shown when Supabase returns an error -->
+            <!-- Error banner -->
             {#if errorMessage}
                 <div class="w-full md:w-140 mt-4 bg-red-100 border border-red-400 text-red-800 text-xs rounded-lg px-4 py-3 text-center">
                     {errorMessage}
@@ -272,7 +277,5 @@
                 </button>
             </div>
         </div>
-
-       
     </form>
 </div>

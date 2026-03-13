@@ -53,12 +53,24 @@ export async function countUnreadNotifications(userId: string): Promise<number> 
 }
 
 /**
- * Mark a notification as read.
+ * Mark a notification as read (call when the user views it).
  */
 export async function markNotificationRead(notificationId: string): Promise<{ error: string | null }> {
   const { error } = await supabase
     .from('notifications')
     .update({ read_at: new Date().toISOString() })
+    .eq('id', notificationId);
+
+  return { error: error?.message ?? null };
+}
+
+/**
+ * Delete a notification (user can only delete their own; RLS enforces).
+ */
+export async function deleteNotification(notificationId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('notifications')
+    .delete()
     .eq('id', notificationId);
 
   return { error: error?.message ?? null };
@@ -75,4 +87,34 @@ export async function markAllNotificationsRead(userId: string): Promise<{ error:
     .is('read_at', null);
 
   return { error: error?.message ?? null };
+}
+
+/**
+ * Insert a new notification for a user.
+ */
+export async function createNotification(
+  userId: string,
+  title: string,
+  body: string,
+  link: string | null = null
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('notifications')
+    .insert({ user_id: userId, title, body, link });
+
+  return { error: error?.message ?? null };
+}
+
+/**
+ * Check whether a notification with the given exact title already exists for a user.
+ * Used to prevent inserting duplicate system notifications.
+ */
+export async function notificationExists(userId: string, title: string): Promise<boolean> {
+  const { count } = await supabase
+    .from('notifications')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('title', title);
+
+  return (count ?? 0) > 0;
 }

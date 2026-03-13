@@ -1,4 +1,6 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
+    import { page } from '$app/stores';
     import { supabase } from '$lib/supabase';
     import { goto } from '$app/navigation';
     import { getLguDashboardPath } from '$lib/auth-redirect';
@@ -11,7 +13,27 @@
     let isSubmitting = $state(false);
     let errorMessage = $state('');
     let infoMessage = $state('');
+    let successMessage = $state('');
     let showErrors = $state(false);
+
+    /* On load, show messages based on URL params and then clean them */
+    onMount(() => {
+        const url = new URL($page.url);
+
+        if (url.searchParams.get('confirmed') === '1') {
+            successMessage = 'Your email is confirmed. You can now log in.';
+            url.searchParams.delete('confirmed');
+        }
+
+        if (url.searchParams.get('registered') === '1') {
+            successMessage = 'Your account was created. Please log in.';
+            url.searchParams.delete('registered');
+        }
+
+        if (url.searchParams.size > 0) {
+            window.history.replaceState({}, '', url.pathname + url.search);
+        }
+    });
 
     /* ── Reactive validation ── */
     const MIN_PASSWORD_LENGTH = 6;
@@ -113,7 +135,7 @@
         <div class="max-w-screen-xl mx-auto flex justify-between items-center h-12 px-4 md:px-4">
             <a href="/" class="relative text-xs md:text-sm text-gray-500" style="font-family: 'Playfair Display SC', serif">DISASTERLINK</a>
             <div class="flex items-center space-x-3 md:space-x-6">
-                <a href="/signup" class="bg-[#768391] text-black rounded px-4 md:px-5 text-xs text-white md:text-sm hover:bg-gray-300 transition p-1 hover:cursor-pointer">Sign Up</a>
+                <a href="/signup/resident" class="bg-[#768391] text-black rounded px-4 md:px-5 text-xs text-white md:text-sm hover:bg-gray-300 transition p-1 hover:cursor-pointer">Sign Up</a>
             </div>
         </div>
     </div>
@@ -124,6 +146,13 @@
         <div class="relative w-full flex flex-col items-center">
             <h1 class="relative text-[#2F4B5D] text-2xl font-bold -mt-25">Welcome Back!</h1>
             <span class="relative top-5 text-[#2F4B5D] font-light -mt-5 text-sm">Let's get you logged in.</span>
+
+            <!-- Success banner (after signup redirect) -->
+            {#if successMessage}
+                <div class="w-60 mt-6 bg-green-50 border border-green-400 text-green-800 text-[10px] rounded-lg px-3 py-2 text-center">
+                    {successMessage}
+                </div>
+            {/if}
 
             <!-- Info banner (email not verified / proof pending) -->
             {#if infoMessage}

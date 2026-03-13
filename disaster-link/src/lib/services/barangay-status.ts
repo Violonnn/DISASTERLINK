@@ -264,11 +264,14 @@ export async function updateBarangayStatus(
 
 /**
  * Create a Leaflet GeoJSON layer from barangays with status.
+ * Optional onPopupOpen: when a popup opens, this runs with the barangay and the popup DOM element (e.g. to inject weather).
  */
 export function createBarangayStatusLayer(
   leafletLib: typeof L,
   barangays: BarangayWithStatus[],
-  onPopupContent?: (b: BarangayWithStatus) => string
+  onPopupContent?: (b: BarangayWithStatus) => string,
+  onBarangayClick?: (b: BarangayWithStatus) => void,
+  onPopupOpen?: (b: BarangayWithStatus, popupElement: HTMLElement) => void | Promise<void>
 ): L.GeoJSON | null {
   const features: GeoJSON.Feature[] = barangays
     .filter((b) => b.boundaryGeojson != null)
@@ -341,6 +344,21 @@ export function createBarangayStatusLayer(
             `</div>`;
 
       layer.bindPopup(html);
+      if (onBarangayClick && p.id) {
+        const b = barangays.find((bb) => bb.id === p.id);
+        if (b) layer.on('click', () => onBarangayClick(b));
+      }
+      /* When the popup opens, run the optional callback so the host can inject content (e.g. weather). */
+      if (onPopupOpen && p.id) {
+        const b = barangays.find((bb) => bb.id === p.id);
+        if (b) {
+          layer.on('popupopen', () => {
+            const popup = layer.getPopup();
+            const el = popup?.getElement();
+            if (el) void onPopupOpen(b, el as HTMLElement);
+          });
+        }
+      }
     }
   });
 }

@@ -4,6 +4,7 @@
    * Shows hazard layers, search, GPS, barangay status layer (realtime), and LGU-specific draw/status controls.
    */
   import { onMount, onDestroy } from 'svelte';
+  import { goto } from '$app/navigation';
   import type L from 'leaflet';
   import {
     HAZARD_LAYERS,
@@ -50,7 +51,7 @@
     type BoundaryRequestForMunicipal,
     type JoinableBarangay
   } from '$lib/services/barangay-boundary';
-  import { fetchNotifications, countUnreadNotifications, markAllNotificationsRead, type Notification } from '$lib/services/notifications';
+  import { fetchNotifications, countUnreadNotifications, markAllNotificationsRead, markNotificationRead, deleteNotification, createNotification, type Notification } from '$lib/services/notifications';
   import { searchPlace, reverseGeocode, type GeocodeResult } from '$lib/services/geocode';
   import {
     fetchBarangayProfile,
@@ -58,27 +59,46 @@
     uploadBrochurePhoto,
     validateBrochurePhoto
   } from '$lib/services/barangay-profile';
-  import {
+import {
     fetchReportTypes,
     fetchAllHazardReports,
+    fetchReportsByReporter,
+    fetchHazardReportsForBarangays,
+    fetchReportsByBarangayId,
     createHazardReport,
+    updateHazardReport,
+    deleteHazardReport,
     uploadReportPhoto,
     uploadReportVideo,
     validateReportPhoto,
     validateReportVideo,
     subscribeReportsRealtime,
+    fetchReportNotes,
+    toggleReportUpvote,
+    createReportNote,
     type ReportType,
     type HazardReport
   } from '$lib/services/hazard-report';
+  import { saveResidentLocation, loadResidentLocation } from '$lib/services/resident-location-session';
+  import { fetchWeatherForBarangay, type WeatherResult } from '$lib/services/weather';
+  import { supabase } from '$lib/supabase';
+
+  interface MenuItem {
+    label: string;
+    href?: string;
+    action?: () => void;
+    /** Optional SVG innerHTML string shown inside the menu icon circle */
+    icon?: string;
+  }
 
   interface Props {
-    mode: 'guest' | 'lgu';
+    mode: 'guest' | 'lgu' | 'resident';
     userLabel?: string;
     userInitials?: string;
     locationLabel?: string;
-    menuItems?: { label: string; href?: string; action?: () => void }[];
-    pfpMenuItems?: { label: string; href?: string; action?: () => void }[];
-    hamburgerMenuItems?: { label: string; href?: string; action?: () => void }[];
+    menuItems?: MenuItem[];
+    pfpMenuItems?: MenuItem[];
+    hamburgerMenuItems?: MenuItem[];
     lguUserId?: string;
     lguRole?: string;
     lguMunicipalityId?: string;
@@ -89,11 +109,23 @@
     onBarangayInfoChanged?: () => void | Promise<void>;
     /** Signed-in user ID for upvote/comment — guests (missing) can only view */
     currentUserId?: string;
+    /** Resident's affiliated barangay name (shown in header for resident mode) */
+    residentBarangayName?: string;
+    /** Resident's user ID (used for signed-in interactions) */
+    residentUserId?: string;
+    /** Resident's affiliated barangay ID (required to submit reports) */
+    residentBarangayId?: string;
+    /** Whether the resident has confirmed their email address (gates Contributions) */
+    isEmailVerified?: boolean;
+    /** Optional initial action when arriving on resident dashboard (e.g. open report panel). */
+    initialResidentAction?: 'openReport' | null;
+    /** Optional report ID that should be focused on the map when the page loads. */
+    initialReportIdToFocus?: string | null;
   }
 
   let {
     mode = 'guest',
-    userLabel = mode === 'guest' ? 'Guest User' : 'LGU',
+    userLabel = mode === 'guest' ? 'Guest User' : mode === 'resident' ? 'Resident' : 'LGU',
     userInitials = '',
     locationLabel = '',
     menuItems = [],
@@ -107,11 +139,17 @@
     pendingRequest = null,
     onBoundaryRequestSubmitted,
     onBarangayInfoChanged,
-    currentUserId
+    currentUserId,
+    residentBarangayName = '',
+    residentUserId = '',
+    residentBarangayId = '',
+    isEmailVerified = true,
+    initialResidentAction = null,
+    initialReportIdToFocus = null
   }: Props = $props();
 
   const signedInUserId = $derived(
-    ((currentUserId ?? (mode === 'lgu' ? lguUserId : '')) || '').trim() || null
+    ((currentUserId ?? (mode === 'lgu' ? lguUserId : mode === 'resident' ? residentUserId : '')) || '').trim() || null
   );
 
   const mapRootId = 'map-dashboard-root';
@@ -138,6 +176,7 @@
   let locationSuccess = $state('');
   let latitude = $state<number | null>(null);
   let longitude = $state<number | null>(null);
+  let detectedBarangayName = $state<string>('Not Detected');
 
   let searchQuery = $state('');
   let searchResults = $state<GeocodeResult[]>([]);
@@ -150,6 +189,9 @@
   let loadingHazards = $state<Record<string, boolean>>({});
 
   let legendOpen = $state(false);
+  /* Resident left sidebar + which sub-panel is open ('legend' | 'hazard' | null) */
+  let residentSidebarOpen = $state(false);
+  let activeSidebarPanel = $state<'legend' | 'hazard' | 'announcement' | 'local-reports' | 'contributions' | null>(null);
   let isFullscreen = $state(false);
   let openMenu = $state<string | null>(null);
   let minglanillaBorderVisible = $state(false);
@@ -207,6 +249,14 @@
   let notifications = $state<Notification[]>([]);
   let unreadCount = $state(0);
 
+  /* Resident notification state for toolbar panel */
+  let residentNotificationsOpen = $state(false);
+  let residentDbNotifications = $state<Notification[]>([]);
+  let residentNotifications = $derived<Notification[]>([...residentDbNotifications]);
+  let residentUnreadCount = $derived(
+    residentDbNotifications.filter((n) => !n.readAt).length
+  );
+
   let barangayMgmtExpanded = $state(false);
 
   let brochurePanelOpen = $state(false);
@@ -215,6 +265,9 @@
   let brochurePhotoFiles = $state<File[]>([]);
   let brochurePhotoError = $state('');
   let isSavingBrochure = $state(false);
+
+  /* Resident toolbar visibility — shown by default, toggled by the chevron tab */
+  let toolbarVisible = $state(true);
 
   /* Hazard report state — LGU can report disasters with location, photos, videos */
   let reportPanelOpen = $state(false);
@@ -228,22 +281,164 @@
   let isSubmittingReport = $state(false);
   let hazardReports = $state<HazardReport[]>([]);
   let reportMarkersLayer = $state<L.LayerGroup | null>(null);
+  let reportMarkerById = $state<Record<string, L.Marker>>({});
   let reportsChannel: ReturnType<typeof subscribeReportsRealtime> | null = null;
+  let residentNotificationsChannel: ReturnType<typeof supabase.channel> | null = null;
   let selectedReport = $state<HazardReport | null>(null);
+  let selectedReportComments = $state<Awaited<ReturnType<typeof fetchReportNotes>>>([]);
+  let selectedReportCommentDraft = $state('');
+  let selectedReportCommentPhotos = $state<string[]>([]);
+  let selectedReportSubmitting = $state(false);
+  let selectedReportHasUpvoted = $state(false);
+  /* Modal comment/reply pagination and reply UI (match feed: 2 initial, +5 on "View more") */
+  let selectedReportCommentVisibleTopCount = $state(0);
+  let selectedReportReplyVisibleCounts = $state<Record<string, number>>({});
+  let selectedReportReplyTarget = $state<string | null>(null);
+  let selectedReportReplyDrafts = $state<Record<string, string>>({});
+  let selectedReportReplyPhotos = $state<Record<string, string[]>>({});
+  let selectedReportSubmittingReplyFor = $state<string | null>(null);
+  let selectedReportActiveCommentFocus = $state(false);
+  let selectedReportTogglingUpvote = $state(false);
   let reportCreateProfile = $state<{ brochurePhotoUrls: string[] } | null>(null);
   let reportPhotoPreviewUrls = $state<string[]>([]);
   let reportVideoPreviewUrls = $state<string[]>([]);
+  /* For residents: barangay detected from current location when opening report (no affiliation required). */
+  let reportBarangayId = $state<string | null>(null);
+  let reportBarangayName = $state<string>('');
+
+  /* Your Contributions (resident): list, sort, edit/delete modals */
+  let userContributions = $state<HazardReport[]>([]);
+  let contributionSort = $state<'date-desc' | 'date-asc' | 'engagement'>('date-desc');
+  let contributionEditReport = $state<HazardReport | null>(null);
+  let contributionDeleteReport = $state<HazardReport | null>(null);
+  let contributionEditTitle = $state('');
+  let contributionEditDescription = $state('');
+  let contributionEditPhotoUrls = $state<string[]>([]);
+  let contributionEditVideoUrls = $state<string[]>([]);
+  let contributionSaving = $state(false);
+  let contributionDeleting = $state(false);
+  let contributionError = $state('');
+  let contributionDeleteError = $state('');
+
+  /* Local reports: all reports in the barangay that contains the user's location (or profile barangay) */
+  let localBarangayReports = $state<HazardReport[]>([]);
+  let localBarangayReportsLoading = $state(false);
+  let localReportSort = $state<'date-desc' | 'date-asc' | 'engagement'>('date-desc');
+  /** Barangay name for the current "local reports" list (from location or profile). */
+  let localReportsBarangayName = $state<string>('');
+
+  const sortedContributions = $derived.by(() => {
+    const list = [...userContributions];
+    if (contributionSort === 'date-desc') return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    if (contributionSort === 'date-asc') return list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const engagement = (r: HazardReport) => (r.upvoteCount ?? 0) + (r.commentCount ?? 0);
+    return list.sort((a, b) => engagement(b) - engagement(a) || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  });
+
+  const sortedLocalBarangayReports = $derived.by(() => {
+    const list = [...localBarangayReports];
+    if (localReportSort === 'date-desc') return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    if (localReportSort === 'date-asc') return list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const engagement = (r: HazardReport) => (r.upvoteCount ?? 0) + (r.commentCount ?? 0);
+    return list.sort((a, b) => engagement(b) - engagement(a) || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  });
+
+  /** Resolve which barangay to use for Local Reports: by user's current location (inside border) first, then profile. */
+  async function loadLocalBarangayReports() {
+    let barangayId: string | null = null;
+    let barangayName = residentBarangayName || '';
+
+    // Prefer barangay that contains the user's current location (reports "within border")
+    if (latitude != null && longitude != null && barangaysWithStatus.length > 0) {
+      const at = getBarangayAtLocation(latitude, longitude);
+      if (at) {
+        barangayId = at.id;
+        barangayName = at.name;
+      }
+    }
+    // Fallback: profile's affiliated barangay
+    if (!barangayId && residentBarangayId) {
+      barangayId = residentBarangayId;
+      barangayName = residentBarangayName || 'your barangay';
+    }
+
+    localReportsBarangayName = barangayName;
+    if (!barangayId) {
+      localBarangayReports = [];
+      return;
+    }
+
+    localBarangayReportsLoading = true;
+    localBarangayReports = await fetchReportsByBarangayId(barangayId);
+    localBarangayReportsLoading = false;
+  }
 
   const DEFAULT_CENTER: [number, number] = [10.3157, 123.8854];
   const DEFAULT_ZOOM = 13;
 
+  /* Toolbar items for resident mode — ordered Map · Report · Feed · Boundary · Hazard Layers.
+     Using $derived so active states (border visible, hazard count) update reactively. */
+  const residentToolbarItems = $derived([
+    {
+      id: 'map',
+      label: 'Map',
+      href: '/resident/dashboard' as string | undefined,
+      action: undefined as (() => void) | undefined,
+      icon: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:18px;height:18px"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 0 1 15 0Z" /></svg>`,
+      active: false
+    },
+    {
+      id: 'report',
+      label: 'Report',
+      href: undefined as string | undefined,
+      action: openReportPanel as (() => void) | undefined,
+      icon: '',
+      active: false
+    },
+    {
+      id: 'feed',
+      label: 'Feed',
+      href: '/resident/feed' as string | undefined,
+      action: undefined as (() => void) | undefined,
+      icon: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:18px;height:18px"><path stroke-linecap="round" stroke-linejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 0 1-2.25 2.25M16.5 7.5V18a2.25 2.25 0 0 0 2.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 0 0 2.25 2.25h13.5M6 7.5h3v3H6v-3Z" /></svg>`,
+      active: false
+    },
+    {
+      id: 'resources',
+      label: 'Resources',
+      href: undefined as string | undefined,
+      action: undefined as (() => void) | undefined,
+      icon: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:18px;height:18px"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>`,
+      active: false
+    },
+    {
+      id: 'hotlines',
+      label: 'Hotlines',
+      href: undefined as string | undefined,
+      action: undefined as (() => void) | undefined,
+      icon: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:18px;height:18px"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" /></svg>`,
+      active: false
+    }
+  ]);
+
+  /* Split toolbar items into left (Map, Feed) and right (Boundary, Hazard) pools.
+     Report is always rendered separately in the center. */
+  const leftToolbarItems  = $derived(residentToolbarItems.filter(i => ['map',       'feed'].includes(i.id)));
+  const rightToolbarItems = $derived(residentToolbarItems.filter(i => ['resources', 'hotlines'].includes(i.id)));
+
   function toggle(name: string) {
+    // Ensure only one of profile menu / notifications / sidebar is open at a time
     notificationsOpen = false;
+    residentNotificationsOpen = false;
+    residentSidebarOpen = false;
     openMenu = openMenu === name ? null : name;
   }
   function close() {
+    // Close all header overlays (profile, notifications, sidebar)
     openMenu = null;
     notificationsOpen = false;
+    residentNotificationsOpen = false;
+    residentSidebarOpen = false;
     barangayMgmtExpanded = false;
   }
 
@@ -290,7 +485,15 @@
     } else {
       map.flyTo([lat, lon], 15, { duration: 1 });
     }
-    searchMarker = leaflet.marker([lat, lon]).addTo(map).bindPopup(displayName).openPopup();
+    /* Violet teardrop pin for search results — visually distinct from report markers. */
+    const searchPinIcon = leaflet.divIcon({
+      className: '',
+      html: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="26" viewBox="0 0 20 26"><path d="M10 0C4.477 0 0 4.477 0 10c0 6.627 10 16 10 16s10-9.373 10-16C20 4.477 15.523 0 10 0z" fill="#7c3aed" stroke="white" stroke-width="1.5"/><circle cx="10" cy="9.5" r="3.5" fill="white" opacity="0.85"/></svg>`,
+      iconSize: [20, 26],
+      iconAnchor: [10, 26],
+      popupAnchor: [0, -26]
+    });
+    searchMarker = leaflet.marker([lat, lon], { icon: searchPinIcon }).addTo(map).bindPopup(displayName).openPopup();
     searchQuery = '';
     searchResults = [];
     searchDropdownOpen = false;
@@ -338,7 +541,6 @@
       (lguBarangayInfo == null || lguBarangayInfo.id !== b.id) &&
       isNeedStatus(b.status);
     const isOwnBarangay = mode === 'lgu' && lguBarangayInfo?.id === b.id;
-
     // Horizontal layout: circle icon + title (consistent across all contexts)
     const circleStyle = 'width:32px;height:32px;min-width:32px;min-height:32px;border-radius:50%;background:#768391;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;margin-bottom:4px';
     const itemStyle = 'display:flex;flex-direction:column;align-items:center;min-width:44px;flex-shrink:0;padding:4px;margin:0;border:none;border-radius:8px;cursor:pointer;background:transparent;transition:background 0.2s;font:inherit;text-decoration:none;color:#333';
@@ -369,8 +571,23 @@
       html += `<span style="font-size:10px;font-weight:500;text-align:center;line-height:1.2">Provide Assistance</span></button>`;
     }
     html += `</div>`;
+    /* Resident: weather section inside the same popup container (loads when popup opens). */
+    if (mode === 'resident') {
+      html += `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #eee;font-size:11px;color:#444" data-weather-container>Loading weather…</div>`;
+    }
     html += `</div>`;
     return html;
+  }
+
+  /* Build HTML for weather block inside the barangay popup (resident only). */
+  function buildWeatherPopupHtml(data: WeatherResult): string {
+    return (
+      `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">` +
+      `<span style="font-weight:600;color:#333;font-size:13px">${Math.round(data.temperatureCelsius)}°C</span>` +
+      `<span style="color:#666">${escapeHtml(data.weatherLabel)}</span>` +
+      `<span style="color:#888;font-size:10px">Humidity ${data.relativeHumidityPercent}% · Wind ${data.windSpeedKmh} km/h</span>` +
+      `</div>`
+    );
   }
 
   function escapeHtml(s: string): string {
@@ -389,7 +606,9 @@
       barangayStatusLayer = null;
     }
 
-    const layer = createBarangayStatusLayer(leaflet, data, buildBarangayPopupHtml);
+    /* Resident: when popup opens, fetch weather and show it inside the same popup container. */
+    const onPopupOpen = mode === 'resident' ? onBarangayPopupOpen : undefined;
+    const layer = createBarangayStatusLayer(leaflet, data, buildBarangayPopupHtml, undefined, onPopupOpen);
     if (layer) {
       layer.addTo(map);
       barangayStatusLayer = layer;
@@ -679,15 +898,18 @@
     isDrawingBoundary = false;
   }
 
-  function handleMapContainerClick(e: MouseEvent) {
-    const assistBtn = (e.target as HTMLElement).closest?.('.provide-assistance-btn');
-    const viewBtn = (e.target as HTMLElement).closest?.('.view-assistance-received-btn');
-    const setStatusBtn = (e.target as HTMLElement).closest?.('.set-status-btn');
+  async function handleMapContainerClick(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    const assistBtn = target.closest?.('.provide-assistance-btn');
+    const viewBtn = target.closest?.('.view-assistance-received-btn');
+    const setStatusBtn = target.closest?.('.set-status-btn');
+
     if (setStatusBtn) {
       statusPanelOpen = true;
       close();
       return;
     }
+
     if (assistBtn) {
       const recipientId = assistBtn.getAttribute('data-recipient-id');
       if (!recipientId) return;
@@ -695,6 +917,7 @@
       if (b) openAssistancePanel(b);
       return;
     }
+
     if (viewBtn) {
       const recipientId = viewBtn.getAttribute('data-recipient-id');
       if (!recipientId) return;
@@ -722,6 +945,18 @@
     assistanceBarangay = null;
     assistanceChannel?.unsubscribe?.();
     assistanceChannel = null;
+  }
+
+  /* When a resident’s barangay popup opens, fetch weather and inject it into the popup container. */
+  async function onBarangayPopupOpen(b: BarangayWithStatus, popupElement: HTMLElement) {
+    const container = popupElement.querySelector('[data-weather-container]');
+    if (!container) return;
+    const { data, error } = await fetchWeatherForBarangay(b);
+    if (error) {
+      container.innerHTML = `<span style="color:#b91c1c;font-size:11px">${escapeHtml(error)}</span>`;
+      return;
+    }
+    if (data) container.innerHTML = buildWeatherPopupHtml(data);
   }
 
   async function openBrochurePanel() {
@@ -1001,7 +1236,14 @@
   }
 
   async function openNotifications() {
+    // Toggle: if already open, close; otherwise open and close other overlays
+    if (notificationsOpen) {
+      notificationsOpen = false;
+      return;
+    }
     openMenu = null;
+    residentNotificationsOpen = false;
+    residentSidebarOpen = false;
     notificationsOpen = true;
     await loadNotifications();
   }
@@ -1010,6 +1252,66 @@
     if (!lguUserId) return;
     await markAllNotificationsRead(lguUserId);
     await loadNotifications();
+  }
+
+  /* Load DB-stored resident notifications (used for the badge count on mount and when
+     opening the panel so the list is always fresh). */
+  async function loadResidentNotifications() {
+    if (!residentUserId) return;
+    residentDbNotifications = await fetchNotifications(residentUserId);
+  }
+
+  async function openResidentNotifications() {
+    /* Toggle — close if already open */
+    if (residentNotificationsOpen) {
+      residentNotificationsOpen = false;
+      return;
+    }
+    /* Close any other open overlays */
+    openMenu = null;
+    notificationsOpen = false;
+    residentSidebarOpen = false;
+    activeSidebarPanel = null;
+    await loadResidentNotifications();
+    residentNotificationsOpen = true;
+  }
+
+  async function handleMarkAllResidentNotificationsRead() {
+    if (!residentUserId) return;
+    await markAllNotificationsRead(residentUserId);
+    await loadResidentNotifications();
+  }
+
+  /** Parse focusReportId from notification link (e.g. /resident/dashboard?focusReportId=uuid). */
+  function parseReportIdFromNotificationLink(link: string | null): string | null {
+    if (!link) return null;
+    try {
+      const url = new URL(link, 'https://dummy');
+      return url.searchParams.get('focusReportId');
+    } catch {
+      return null;
+    }
+  }
+
+  /* Mark a single notification as read; then locate and view the report on the map (View). */
+  async function handleResidentNotificationView(n: Notification) {
+    if (n.readAt === null) await markNotificationRead(n.id);
+    await loadResidentNotifications();
+    residentNotificationsOpen = false;
+    const reportId = parseReportIdFromNotificationLink(n.link);
+    if (reportId) {
+      await focusReportOnMap(reportId);
+    } else if (n.link) {
+      goto(n.link);
+    }
+  }
+
+  /* Delete one notification and refresh the list. */
+  async function handleResidentNotificationDelete(notificationId: string, e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    await deleteNotification(notificationId);
+    await loadResidentNotifications();
   }
 
   async function toggleMinglanillaBorder() {
@@ -1041,6 +1343,64 @@
     }
   }
 
+  function updateDetectedBarangay() {
+    if (latitude == null || longitude == null || barangaysWithStatus.length === 0) {
+      detectedBarangayName = 'Not Detected';
+      return;
+    }
+    const lat = latitude;
+    const lon = longitude;
+    // Simple point-in-polygon check over all barangay boundaries
+    for (const b of barangaysWithStatus) {
+      const geo = b.boundaryGeojson as GeoJSON.Geometry | null | undefined;
+      if (!geo) continue;
+      if (geometryContainsPoint(geo, lat, lon)) {
+        detectedBarangayName = b.name;
+        return;
+      }
+    }
+    detectedBarangayName = 'Not Detected';
+  }
+
+  function geometryContainsPoint(geometry: GeoJSON.Geometry, lat: number, lon: number): boolean {
+    if (geometry.type === 'Polygon') {
+      return polygonContainsPoint(geometry.coordinates, lat, lon);
+    }
+    if (geometry.type === 'MultiPolygon') {
+      return geometry.coordinates.some((poly) => polygonContainsPoint(poly, lat, lon));
+    }
+    return false;
+  }
+
+  function polygonContainsPoint(
+    coordinates: GeoJSON.Position[][],
+    lat: number,
+    lon: number
+  ): boolean {
+    // Ray casting algorithm on the outer ring (first element)
+    const ring = coordinates[0];
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [lonI, latI] = ring[i] as [number, number];
+      const [lonJ, latJ] = ring[j] as [number, number];
+      const intersect =
+        latI > lat !== latJ > lat &&
+        lon < ((lonJ - lonI) * (lat - latI)) / (latJ - latI + 0.0000001) + lonI;
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  /** Returns the barangay that contains the given point, or null. Used for resident report (detect which barangay they are in). */
+  function getBarangayAtLocation(lat: number, lon: number): { id: string; name: string } | null {
+    for (const b of barangaysWithStatus) {
+      const geo = b.boundaryGeojson as GeoJSON.Geometry | null | undefined;
+      if (!geo) continue;
+      if (geometryContainsPoint(geo, lat, lon)) return { id: b.id, name: b.name };
+    }
+    return null;
+  }
+
   async function getMyLocation() {
     if (!map || !leaflet) return;
     if (!navigator.geolocation) {
@@ -1063,14 +1423,34 @@
       longitude = lon;
       if (marker) map.removeLayer(marker);
       map.flyTo([lat, lon], 16, { duration: 1.5 });
+      /* Navy teardrop pin — matches the system's primary color so residents
+         instantly recognise the "you are here" marker vs report markers. */
+      const locationPinIcon = leaflet.divIcon({
+        className: '',
+        html: `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 20 26"><path d="M10 0C4.477 0 0 4.477 0 10c0 6.627 10 16 10 16s10-9.373 10-16C20 4.477 15.523 0 10 0z" fill="#1B2E3A" stroke="white" stroke-width="1.5"/><circle cx="10" cy="9.5" r="3.5" fill="white" opacity="0.85"/></svg>`,
+        iconSize: [28, 36],
+        iconAnchor: [14, 36],
+        popupAnchor: [0, -36]
+      });
       marker = leaflet
-        .marker([lat, lon])
+        .marker([lat, lon], { icon: locationPinIcon })
         .addTo(map)
         .bindPopup('Locating address…')
         .openPopup();
       const address = await reverseGeocode(lat, lon);
       locationText = address;
       marker.setPopupContent(address);
+      updateDetectedBarangay();
+      if (mode === 'resident') {
+        // Persist the successful location lookup for the rest of this tab session.
+        saveResidentLocation({
+          latitude: lat,
+          longitude: lon,
+          locationText: address,
+          detectedBarangayName,
+          savedAt: Date.now()
+        });
+      }
     } catch (err: unknown) {
       const geo = err as GeolocationPositionError;
       if (geo.code === 1) locationError = 'Location permission denied. Please allow access in your browser settings.';
@@ -1080,6 +1460,34 @@
     } finally {
       isLocating = false;
     }
+  }
+
+  /* Restore a previously saved resident location when returning to the dashboard. */
+  function restoreResidentLocationFromSession() {
+    if (mode !== 'resident') return;
+    const stored = loadResidentLocation();
+    if (!stored || !map || !leaflet) return;
+    latitude = stored.latitude;
+    longitude = stored.longitude;
+    locationText = stored.locationText;
+    detectedBarangayName = stored.detectedBarangayName || detectedBarangayName;
+    if (marker) {
+      map.removeLayer(marker);
+      marker = null;
+    }
+    const locationPinIcon = leaflet.divIcon({
+      className: '',
+      html: `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 20 26"><path d="M10 0C4.477 0 0 4.477 0 10c0 6.627 10 16 10 16s10-9.373 10-16C20 4.477 15.523 0 10 0z" fill="#1B2E3A" stroke="white" stroke-width="1.5"/><circle cx="10" cy="9.5" r="3.5" fill="white" opacity="0.85"/></svg>`,
+      iconSize: [28, 36],
+      iconAnchor: [14, 36],
+      popupAnchor: [0, -36]
+    });
+    map.setView([stored.latitude, stored.longitude], 16);
+    marker = leaflet
+      .marker([stored.latitude, stored.longitude], { icon: locationPinIcon })
+      .addTo(map)
+      .bindPopup(stored.locationText)
+      .openPopup();
   }
 
   async function toggleHazardLayer(hazardType: HazardType) {
@@ -1111,9 +1519,35 @@
     return Object.keys(activeHazardLayers).length;
   }
 
-  /* ── Hazard report: open panel, capture location first, then show form ── */
+  /* ── Hazard report: open panel, capture location first, then show form. Residents: barangay is detected from location (no affiliation required). ── */
   async function openReportPanel() {
-    if (!lguBarangayInfo?.id || !lguUserId) return;
+    const userId = mode === 'resident' ? residentUserId : lguUserId;
+    if (!userId) return;
+
+    if (mode === 'lgu') {
+      if (!lguBarangayInfo?.id) return;
+      reportBarangayId = lguBarangayInfo.id;
+      reportBarangayName = lguBarangayInfo.name ?? '';
+    } else {
+      // For residents, ensure we have a current location first so the report
+      // can reuse it and be persisted for the session.
+      if (latitude == null || longitude == null) {
+        await getMyLocation();
+      }
+      if (latitude == null || longitude == null) {
+        // If location is still not available (denied / error), do not open the form.
+        return;
+      }
+      const where = getBarangayAtLocation(latitude, longitude);
+      if (where) {
+        reportBarangayId = where.id;
+        reportBarangayName = where.name;
+      } else {
+        reportBarangayId = null;
+        reportBarangayName = '';
+      }
+    }
+
     reportPanelOpen = true;
     reportTitle = '';
     reportDescription = '';
@@ -1122,13 +1556,15 @@
     reportVideoFiles = [];
     reportMediaError = '';
     reportCreateProfile = null;
-    if (lguBarangayInfo?.id) {
+
+    if (reportTypes.length === 0) reportTypes = await fetchReportTypes();
+    if (reportTypes.length > 0) reportTypeId = reportTypes[0].id;
+
+    if (mode === 'lgu' && lguBarangayInfo?.id) {
       const profile = await fetchBarangayProfile(lguBarangayInfo.id);
       reportCreateProfile = profile ? { brochurePhotoUrls: profile.brochurePhotoUrls } : null;
     }
-    if (reportTypes.length === 0) reportTypes = await fetchReportTypes();
-    if (reportTypes.length > 0) reportTypeId = reportTypes[0].id;
-    /* Capture location immediately when opening */
+
     if (!navigator.geolocation) {
       locationError = 'Geolocation is required to report. Enable it in your browser.';
       return;
@@ -1143,11 +1579,41 @@
           maximumAge: 0
         });
       });
-      latitude = position.coords.latitude;
-      longitude = position.coords.longitude;
-      if (map && marker) map.removeLayer(marker);
-      marker = leaflet!.marker([latitude!, longitude!]).addTo(map!).bindPopup('Report location').openPopup();
-      map?.flyTo([latitude!, longitude!], 16, { duration: 1 });
+      const lat = position.coords.latitude;
+      const lon = position.coords.longitude;
+      latitude = lat;
+      longitude = lon;
+      /* Reuse the same "Current Location" marker instead of a second report marker. */
+      const locationPinIcon = leaflet!.divIcon({
+        className: '',
+        html: `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 20 26"><path d="M10 0C4.477 0 0 4.477 0 10c0 6.627 10 16 10 16s10-9.373 10-16C20 4.477 15.523 0 10 0z" fill="#1B2E3A" stroke="white" stroke-width="1.5"/><circle cx="10" cy="9.5" r="3.5" fill="white" opacity="0.85"/></svg>`,
+        iconSize: [28, 36],
+        iconAnchor: [14, 36],
+        popupAnchor: [0, -36]
+      });
+      if (marker && map) {
+        marker.setLatLng([lat, lon]);
+        marker.setIcon(locationPinIcon);
+        marker.setPopupContent('Current Location');
+        if (!map.hasLayer(marker)) marker.addTo(map);
+        marker.openPopup();
+      } else if (map && leaflet) {
+        marker = leaflet.marker([lat, lon], { icon: locationPinIcon }).addTo(map).bindPopup('Current Location').openPopup();
+      }
+      map?.flyTo([lat, lon], 16, { duration: 1 });
+      updateDetectedBarangay();
+
+      if (mode === 'resident') {
+        const at = getBarangayAtLocation(lat, lon);
+        if (at) {
+          reportBarangayId = at.id;
+          reportBarangayName = at.name;
+          const profile = await fetchBarangayProfile(at.id);
+          reportCreateProfile = profile ? { brochurePhotoUrls: profile.brochurePhotoUrls } : null;
+        } else {
+          locationError = 'Your location is not within a barangay boundary. Move inside a barangay area and try again.';
+        }
+      }
     } catch (err: unknown) {
       const geo = err as GeolocationPositionError;
       if (geo.code === 1) locationError = 'Location permission denied. Please allow access to report.';
@@ -1163,6 +1629,8 @@
     reportPhotoPreviewUrls.forEach((u) => URL.revokeObjectURL(u));
     reportVideoPreviewUrls.forEach((u) => URL.revokeObjectURL(u));
     reportPanelOpen = false;
+    reportBarangayId = null;
+    reportBarangayName = '';
     reportTitle = '';
     reportDescription = '';
     reportTypeId = '';
@@ -1221,7 +1689,13 @@
   }
 
   async function submitReport() {
-    if (!lguBarangayInfo?.id || !lguUserId || latitude == null || longitude == null) return;
+    const barangayId = mode === 'resident' ? reportBarangayId : lguBarangayInfo?.id;
+    const userId     = mode === 'resident' ? residentUserId     : lguUserId;
+    if (mode === 'resident' && !reportBarangayId) {
+      locationError = 'Your location is not within a barangay boundary. Move inside a barangay area and try again.';
+      return;
+    }
+    if (!barangayId || !userId || latitude == null || longitude == null) return;
     const title = reportTitle.trim();
     if (title.length < 2) {
       locationError = 'Please enter a title (at least 2 characters).';
@@ -1250,8 +1724,8 @@
         if (url) videoUrls.push(url);
       }
       const { id, error } = await createHazardReport({
-        barangayId: lguBarangayInfo.id,
-        reporterId: lguUserId,
+        barangayId: barangayId,
+        reporterId: userId,
         reportTypeId,
         title,
         description: reportDescription.trim(),
@@ -1265,18 +1739,31 @@
         closeReportPanel();
         locationSuccess = 'Report submitted successfully.';
         await refreshReportMarkers();
+        await loadUserContributions();
       }
     } finally {
       isSubmittingReport = false;
     }
   }
 
-  function openReportDetail(r: HazardReport) {
+  async function openReportDetail(r: HazardReport) {
     selectedReport = r;
+    await refreshSelectedReportState(r.id);
   }
 
   function closeReportDetail() {
     selectedReport = null;
+    selectedReportComments = [];
+    selectedReportCommentDraft = '';
+    selectedReportCommentPhotos = [];
+    selectedReportSubmitting = false;
+    selectedReportHasUpvoted = false;
+    selectedReportCommentVisibleTopCount = 0;
+    selectedReportReplyVisibleCounts = {};
+    selectedReportReplyTarget = null;
+    selectedReportReplyDrafts = {};
+    selectedReportReplyPhotos = {};
+    selectedReportActiveCommentFocus = false;
   }
 
   function buildReportTooltipHtml(r: HazardReport): string {
@@ -1312,12 +1799,15 @@
       map.removeLayer(reportMarkersLayer);
       reportMarkersLayer = null;
     }
+    reportMarkerById = {};
     if (hazardReports.length === 0) return;
+    /* Compact red circle marker for hazard/disaster reports — slightly smaller
+       than the original 24 px to reduce visual clutter on dense map areas. */
     const hazardIcon = leaflet.divIcon({
-      className: 'hazard-report-marker',
-      html: '<div style="width:24px;height:24px;background:#dc2626;border:2px solid white;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.3)"></div>',
-      iconSize: [24, 24],
-      iconAnchor: [12, 12]
+      className: '',
+      html: '<div style="width:20px;height:20px;background:#dc2626;border:2px solid white;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.35)"></div>',
+      iconSize: [20, 20],
+      iconAnchor: [10, 10]
     });
     const group = leaflet.layerGroup();
     for (const r of hazardReports) {
@@ -1326,9 +1816,331 @@
       m.on('click', () => openReportDetail(r));
       m.bindTooltip(buildReportTooltipHtml(r), { direction: 'top', className: 'hazard-marker-tooltip', offset: [0, -8] });
       group.addLayer(m);
+      reportMarkerById = { ...reportMarkerById, [r.id]: m };
     }
     group.addTo(map);
     reportMarkersLayer = group;
+  }
+
+  async function refreshSelectedReportState(reportId: string) {
+    selectedReportComments = await fetchReportNotes(reportId);
+    const topLevel = selectedReportComments.filter((n) => !n.parentNoteId);
+    selectedReportCommentVisibleTopCount = topLevel.length === 0 ? 0 : Math.min(2, topLevel.length);
+    const replyCounts: Record<string, number> = {};
+    for (const note of topLevel) {
+      const replies = selectedReportComments.filter((n) => n.parentNoteId === note.id);
+      replyCounts[note.id] = Math.min(2, replies.length);
+    }
+    selectedReportReplyVisibleCounts = replyCounts;
+    if (!signedInUserId) {
+      selectedReportHasUpvoted = false;
+      return;
+    }
+    const { data, error } = await supabase
+      .from('report_upvotes')
+      .select('id')
+      .eq('report_id', reportId)
+      .eq('user_id', signedInUserId)
+      .limit(1);
+    if (error) {
+      selectedReportHasUpvoted = false;
+      return;
+    }
+    selectedReportHasUpvoted = (data ?? []).length > 0;
+  }
+
+  async function submitSelectedReportComment() {
+    if (!selectedReport || !signedInUserId) return;
+    const draft = selectedReportCommentDraft.trim();
+    if (draft.length < 2) {
+      locationError = 'Comment must be at least 2 characters long.';
+      return;
+    }
+    selectedReportSubmitting = true;
+    const photoUrls = [...selectedReportCommentPhotos];
+    const { error } = await createReportNote(selectedReport.id, draft, { photoUrls });
+    selectedReportSubmitting = false;
+    if (error) {
+      locationError = error;
+      return;
+    }
+    selectedReportCommentDraft = '';
+    selectedReportCommentPhotos = [];
+    await refreshSelectedReportState(selectedReport.id);
+    await refreshReportMarkers();
+    /* Notify the report owner if someone else commented on their report. */
+    if (selectedReport.reporterId && selectedReport.reporterId !== signedInUserId) {
+      const link = `/resident/dashboard?focusReportId=${encodeURIComponent(selectedReport.id)}`;
+      await createNotification(selectedReport.reporterId, 'New comment on your report', 'Someone commented on your report.', link);
+    }
+  }
+
+  async function toggleSelectedReportUpvote() {
+    if (!selectedReport) return;
+    selectedReportTogglingUpvote = true;
+    const { hasUpvoted, error } = await toggleReportUpvote(selectedReport.id);
+    selectedReportTogglingUpvote = false;
+    if (error) {
+      locationError = error;
+      return;
+    }
+    selectedReportHasUpvoted = hasUpvoted;
+    // Update local selectedReport + hazardReports counts optimistically
+    const delta = hasUpvoted ? 1 : -1;
+    selectedReport = {
+      ...selectedReport,
+      upvoteCount: Math.max(0, (selectedReport.upvoteCount ?? 0) + delta)
+    };
+    hazardReports = hazardReports.map((r) =>
+      r.id === selectedReport!.id
+        ? { ...r, upvoteCount: Math.max(0, (r.upvoteCount ?? 0) + delta) }
+        : r
+    );
+    // Keep contributions list in sync if present
+    userContributions = userContributions.map((r) =>
+      r.id === selectedReport!.id
+        ? { ...r, upvoteCount: Math.max(0, (r.upvoteCount ?? 0) + delta) }
+        : r
+    );
+    /* Notify the report owner when someone else upvotes their report (only on new upvote). */
+    if (hasUpvoted && selectedReport.reporterId && selectedReport.reporterId !== signedInUserId) {
+      const link = `/resident/dashboard?focusReportId=${encodeURIComponent(selectedReport.id)}`;
+      await createNotification(selectedReport.reporterId, 'New upvote on your report', 'Someone upvoted your report.', link);
+    }
+  }
+
+  /* Focus a specific report on the map by ID and highlight it for the resident. */
+  async function focusReportOnMap(reportId: string) {
+    if (!map || !leaflet) return;
+    if (!hazardReports.length) {
+      await refreshReportMarkers();
+    }
+    const report = hazardReports.find((r) => r.id === reportId);
+    if (!report || report.gpsLat == null || report.gpsLng == null) return;
+    const markerForReport = reportMarkerById[report.id];
+    const center: [number, number] = [report.gpsLat, report.gpsLng];
+    map.flyTo(center, 16, { duration: 1.2 });
+    if (markerForReport && typeof markerForReport.openTooltip === 'function') {
+      markerForReport.openTooltip();
+    }
+    // Also open the full report detail panel so it feels clearly highlighted.
+    openReportDetail(report);
+  }
+
+  /* Locate a report on the map only (fly to marker + tooltip), without opening the detail modal. */
+  async function locateReportOnMap(reportId: string) {
+    if (!map || !leaflet) return;
+    if (!hazardReports.length) {
+      await refreshReportMarkers();
+    }
+    const report = hazardReports.find((r) => r.id === reportId);
+    if (!report || report.gpsLat == null || report.gpsLng == null) return;
+    const markerForReport = reportMarkerById[report.id];
+    const center: [number, number] = [report.gpsLat, report.gpsLng];
+    map.flyTo(center, 16, { duration: 1.2 });
+    if (markerForReport && typeof markerForReport.openTooltip === 'function') {
+      markerForReport.openTooltip();
+    }
+  }
+
+  async function loadUserContributions() {
+    if (mode !== 'resident' || !residentUserId) return;
+    userContributions = await fetchReportsByReporter(residentUserId);
+  }
+
+  function openContributionEdit(r: HazardReport) {
+    contributionEditReport = r;
+    contributionEditTitle = r.title ?? '';
+    contributionEditDescription = r.description ?? '';
+    contributionEditPhotoUrls = [...(r.photoUrls ?? [])];
+    contributionEditVideoUrls = [...(r.videoUrls ?? [])];
+    contributionError = '';
+  }
+
+  function closeContributionEdit() {
+    contributionEditReport = null;
+    contributionError = '';
+  }
+
+  function removeContributionEditPhoto(i: number) {
+    contributionEditPhotoUrls = contributionEditPhotoUrls.filter((_, idx) => idx !== i);
+  }
+
+  function removeContributionEditVideo(i: number) {
+    contributionEditVideoUrls = contributionEditVideoUrls.filter((_, idx) => idx !== i);
+  }
+
+  async function addContributionEditPhotos(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    for (const file of files) {
+      const url = await uploadReportPhoto(file);
+      if (url) contributionEditPhotoUrls = [...contributionEditPhotoUrls, url];
+    }
+  }
+
+  async function addContributionEditVideos(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    for (const file of files) {
+      const url = await uploadReportVideo(file);
+      if (url) contributionEditVideoUrls = [...contributionEditVideoUrls, url];
+    }
+  }
+
+  async function saveContributionEdit() {
+    if (!contributionEditReport || !residentUserId) return;
+    const title = contributionEditTitle.trim();
+    if (title.length < 2) {
+      contributionError = 'Title must be at least 2 characters.';
+      return;
+    }
+    if (contributionEditDescription.trim().length < 5) {
+      contributionError = 'Description must be at least 5 characters.';
+      return;
+    }
+    contributionSaving = true;
+    contributionError = '';
+    const { error } = await updateHazardReport(contributionEditReport.id, residentUserId, {
+      title,
+      description: contributionEditDescription.trim(),
+      photoUrls: contributionEditPhotoUrls,
+      videoUrls: contributionEditVideoUrls
+    });
+    contributionSaving = false;
+    if (error) contributionError = error;
+    else {
+      closeContributionEdit();
+      await loadUserContributions();
+      await refreshReportMarkers();
+    }
+  }
+
+  function openContributionDelete(r: HazardReport) {
+    contributionDeleteReport = r;
+    contributionDeleteError = '';
+  }
+
+  function closeContributionDelete() {
+    contributionDeleteReport = null;
+    contributionDeleteError = '';
+  }
+
+  async function confirmContributionDelete() {
+    if (!contributionDeleteReport || !residentUserId) return;
+    contributionDeleting = true;
+    contributionDeleteError = '';
+    const { error } = await deleteHazardReport(contributionDeleteReport.id, residentUserId);
+    contributionDeleting = false;
+    if (error) {
+      contributionDeleteError = error;
+      return;
+    }
+    closeContributionDelete();
+    await loadUserContributions();
+    await refreshReportMarkers();
+  }
+
+  function formatContributionDate(iso: string): string {
+    return new Date(iso).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function isReportEdited(r: HazardReport): boolean {
+    const u = r.updatedAt;
+    if (!u) return false;
+    return new Date(u).getTime() > new Date(r.createdAt).getTime() + 1000;
+  }
+
+  function initialsFromName(name: string): string {
+    const parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    return name.slice(0, 2).toUpperCase();
+  }
+
+  function timeAgo(isoString: string): string {
+    const diff = Date.now() - new Date(isoString).getTime();
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days}d ago`;
+    return new Date(isoString).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function getSelectedReportTopLevelNotes(): Awaited<ReturnType<typeof fetchReportNotes>> {
+    const notes = selectedReportComments;
+    return notes.filter((n) => !n.parentNoteId);
+  }
+
+  function getSelectedReportRepliesForNote(parentNoteId: string): Awaited<ReturnType<typeof fetchReportNotes>> {
+    return selectedReportComments.filter((n) => n.parentNoteId === parentNoteId);
+  }
+
+  function showMoreSelectedReportComments() {
+    const allTop = getSelectedReportTopLevelNotes();
+    const next = Math.min(allTop.length, selectedReportCommentVisibleTopCount + 5);
+    selectedReportCommentVisibleTopCount = next;
+  }
+
+  function showMoreSelectedReportReplies(parentNoteId: string) {
+    const allReplies = getSelectedReportRepliesForNote(parentNoteId);
+    const current = selectedReportReplyVisibleCounts[parentNoteId] ?? Math.min(2, allReplies.length);
+    const next = Math.min(allReplies.length, current + 5);
+    selectedReportReplyVisibleCounts = { ...selectedReportReplyVisibleCounts, [parentNoteId]: next };
+  }
+
+  function startSelectedReportReply(noteId: string) {
+    selectedReportReplyTarget = noteId;
+  }
+
+  function cancelSelectedReportReply() {
+    selectedReportReplyTarget = null;
+  }
+
+  async function submitSelectedReportReply(parentNoteId: string) {
+    if (!selectedReport || !signedInUserId) return;
+    const draft = (selectedReportReplyDrafts[parentNoteId] ?? '').trim();
+    if (draft.length < 2) {
+      locationError = 'Reply must be at least 2 characters long.';
+      return;
+    }
+    selectedReportSubmittingReplyFor = parentNoteId;
+    const photoUrls = selectedReportReplyPhotos[parentNoteId] ?? [];
+    const { error } = await createReportNote(selectedReport.id, draft, { photoUrls, parentNoteId });
+    selectedReportSubmittingReplyFor = null;
+    if (error) {
+      locationError = error;
+      return;
+    }
+    const nextDrafts = { ...selectedReportReplyDrafts };
+    delete nextDrafts[parentNoteId];
+    selectedReportReplyDrafts = nextDrafts;
+    const nextPhotos = { ...selectedReportReplyPhotos };
+    delete nextPhotos[parentNoteId];
+    selectedReportReplyPhotos = nextPhotos;
+    if (selectedReportReplyTarget === parentNoteId) selectedReportReplyTarget = null;
+    await refreshSelectedReportState(selectedReport.id);
+    await refreshReportMarkers();
+  }
+
+  function removeSelectedReportReplyPhoto(parentNoteId: string, url: string) {
+    const existing = selectedReportReplyPhotos[parentNoteId] ?? [];
+    const next = existing.filter((u) => u !== url);
+    if (next.length === 0) {
+      const copy = { ...selectedReportReplyPhotos };
+      delete copy[parentNoteId];
+      selectedReportReplyPhotos = copy;
+    } else {
+      selectedReportReplyPhotos = { ...selectedReportReplyPhotos, [parentNoteId]: next };
+    }
+  }
+
+  function removeSelectedReportCommentPhoto(url: string) {
+    selectedReportCommentPhotos = selectedReportCommentPhotos.filter((u) => u !== url);
   }
 
   onMount(() => {
@@ -1357,7 +2169,11 @@
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         maxZoom: 19
       }).addTo(map);
-      L.control.zoom({ position: 'topleft' }).addTo(map);
+      /* Only add Leaflet's built-in zoom control for non-resident modes.
+         Resident mode uses custom zoom buttons in the bottom-right UI. */
+      if (mode !== 'resident') {
+        L.control.zoom({ position: 'topleft' }).addTo(map);
+      }
 
       try {
         await refreshBarangayStatusLayer();
@@ -1365,6 +2181,38 @@
         reportsChannel = subscribeReportsRealtime(() => refreshReportMarkers());
         if (mode === 'lgu' && lguUserId) {
           unreadCount = await countUnreadNotifications(lguUserId);
+        }
+        /* Pre-load resident notifications and subscribe to new ones so the badge updates in real time */
+        if (mode === 'resident' && residentUserId) {
+          await loadResidentNotifications();
+          residentNotificationsChannel = supabase
+            .channel('resident-notifications')
+            .on(
+              'postgres_changes',
+              { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${residentUserId}` },
+              () => loadResidentNotifications()
+            )
+            .on(
+              'postgres_changes',
+              { event: 'UPDATE', schema: 'public', table: 'notifications', filter: `user_id=eq.${residentUserId}` },
+              () => loadResidentNotifications()
+            )
+            .on(
+              'postgres_changes',
+              { event: 'DELETE', schema: 'public', table: 'notifications', filter: `user_id=eq.${residentUserId}` },
+              () => loadResidentNotifications()
+            )
+            .subscribe();
+          // Restore a previously saved location so residents do not have to keep
+          // tapping "Get My Location" as they move between feed and dashboard.
+          restoreResidentLocationFromSession();
+          // If the page was opened with an action from another screen, perform it now.
+          if (initialResidentAction === 'openReport') {
+            await openReportPanel();
+          }
+          if (initialReportIdToFocus) {
+            await focusReportOnMap(initialReportIdToFocus);
+          }
         }
       } catch {
         /* Barangay layer may fail if tables not set up; map still works */
@@ -1379,6 +2227,7 @@
     realtimeChannel?.unsubscribe?.();
     assistanceChannel?.unsubscribe?.();
     reportsChannel?.unsubscribe?.();
+    residentNotificationsChannel?.unsubscribe?.();
     if (typeof document !== 'undefined') {
       document.documentElement.style.overflow = '';
       document.body.style.overflow = '';
@@ -1426,8 +2275,32 @@
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
   }
+  /* Slim dark scrollbar that matches the system's navy theme */
+  .sidebar-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.18) rgba(255,255,255,0.04);
+  }
+  .sidebar-scroll::-webkit-scrollbar {
+    width: 5px;
+  }
+  .sidebar-scroll::-webkit-scrollbar-track {
+    background: rgba(255,255,255,0.04);
+    border-radius: 3px;
+  }
+  .sidebar-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.18);
+    border-radius: 3px;
+  }
+  .sidebar-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,0.30);
+  }
   :global(.hazard-marker-tooltip .report-tooltip-with-img) {
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  /* Contribution sort dropdown: options visible when opened (native select) */
+  :global(.contribution-sort-select option) {
+    background: #fff;
+    color: #111;
   }
 </style>
 
@@ -1435,14 +2308,14 @@
   <header class="h-12 md:h-14 shrink-0 bg-[#0C212F]/95 shadow-md z-50 border-b border-white/10">
     <div class="h-full mx-auto flex items-center justify-between gap-2 px-3 md:px-4 max-w-screen-xl relative">
       <div class="flex items-center gap-2 md:gap-3 relative z-20 shrink-0">
-        {#if openMenu || notificationsOpen}
+        {#if openMenu || notificationsOpen || residentNotificationsOpen}
           <button class="fixed inset-0 z-10 cursor-default" onclick={close} aria-label="Close menu"></button>
         {/if}
         <div class="flex items-center gap-2 bg-[#768391]/10 rounded-full px-2 md:px-3 py-1 relative z-20">
           <div class="relative">
             <button
               class="bg-white/20 text-white rounded-full w-7 h-7 md:w-8 md:h-8 flex items-center justify-center text-[10px] md:text-xs font-bold hover:bg-white/30 transition cursor-pointer touch-manipulation"
-              onclick={() => toggle('pfp')}
+              onclick={() => { if (mode === 'resident') { residentSidebarOpen = false; activeSidebarPanel = null; } toggle('pfp'); }}
             >
               {userInitials || userLabel.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase() || '?'}
             </button>
@@ -1450,7 +2323,7 @@
               <div class="absolute left-0 mt-3 w-48 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30">
                 <p class="px-3 py-2 text-[10px] text-gray-400 border-b border-gray-100">{userLabel}</p>
                 <div class="p-2">
-                  {#each (mode === 'lgu' && pfpMenuItems ? pfpMenuItems : menuItems) as item}
+                  {#each ((mode === 'lgu' || mode === 'resident') && pfpMenuItems ? pfpMenuItems : menuItems) as item}
                     {#if item.href}
                       <a href={item.href} class="block px-3 py-2 hover:bg-gray-50 rounded-lg text-xs text-[#1B2E3A]">{item.label}</a>
                     {:else if item.action}
@@ -1493,10 +2366,19 @@
                     {:else}
                       <div class="divide-y divide-gray-100">
                         {#each notifications as n}
-                          <a href={n.link ?? '#'} class="block px-3 py-2.5 hover:bg-gray-50 transition {n.readAt ? 'opacity-70' : ''}" onclick={() => (notificationsOpen = false)}>
-                            <p class="text-[#1B2E3A] text-xs font-medium">{n.title}</p>
-                            <p class="text-gray-600 text-[10px] mt-0.5 line-clamp-2">{n.body}</p>
-                            <p class="text-gray-400 text-[10px] mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                          <a
+                            href={n.link ?? '#'}
+                            class="flex items-start gap-2 px-3 py-2.5 hover:bg-gray-50 transition {n.readAt ? 'opacity-70' : ''}"
+                            onclick={() => (notificationsOpen = false)}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" class="w-4 h-4 mt-0.5 shrink-0">
+                              <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15A2.25 2.25 0 0 1 2.25 17.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
+                            </svg>
+                            <div class="flex-1 min-w-0">
+                              <p class="text-[#1B2E3A] text-xs font-medium">{n.title}</p>
+                              <p class="text-gray-600 text-[10px] mt-0.5 line-clamp-2">{n.body}</p>
+                              <p class="text-gray-400 text-[10px] mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                            </div>
                           </a>
                         {/each}
                       </div>
@@ -1506,20 +2388,98 @@
               {/if}
             </div>
           {/if}
+          {#if mode === 'resident'}
+            <div class="relative">
+              <button
+                class="cursor-pointer p-1 touch-manipulation relative"
+                onclick={openResidentNotifications}
+                aria-label="Notifications"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="white" class="w-5 h-5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75v-.7V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" />
+                </svg>
+                {#if residentUnreadCount > 0}
+                  <span class="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center">{residentUnreadCount > 99 ? '99+' : residentUnreadCount}</span>
+                {/if}
+              </button>
+
+              {#if residentNotificationsOpen}
+                <div class="absolute left-0 mt-3 w-80 max-w-[calc(100vw-2rem)] max-h-[60vh] bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30 flex flex-col">
+                  <div class="flex items-center justify-between px-3 py-2.5 border-b border-gray-100 shrink-0">
+                    <span class="text-[#1B2E3A] text-xs font-semibold">Notifications</span>
+                    <div class="flex gap-1">
+                      {#if residentDbNotifications.filter(n => !n.readAt).length > 0}
+                        <button onclick={handleMarkAllResidentNotificationsRead} class="text-cyan-600 text-[10px] hover:underline cursor-pointer">Read all</button>
+                      {/if}
+                      <button onclick={() => (residentNotificationsOpen = false)} class="text-gray-400 hover:text-[#1B2E3A] transition cursor-pointer text-sm" aria-label="Close">&times;</button>
+                    </div>
+                  </div>
+                  <div class="overflow-y-auto min-h-0 flex-1">
+                    {#if residentNotifications.length === 0}
+                      <p class="px-3 py-4 text-gray-500 text-xs">No notifications.</p>
+                    {:else}
+                      <div class="divide-y divide-gray-100">
+                        {#each residentNotifications as n}
+                          <div class="flex items-start gap-2 px-3 py-2.5 hover:bg-gray-50 transition {n.readAt ? 'opacity-70' : ''}">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#1B2E3A" class="w-4 h-4 mt-0.5 shrink-0">
+                              <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15A2.25 2.25 0 0 1 2.25 17.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
+                            </svg>
+                            <div class="flex-1 min-w-0">
+                              <p class="text-[#1B2E3A] text-xs font-medium">{n.title}</p>
+                              {#if !n.readAt && n.id === 'unverified'}
+                                <p class="text-amber-600 text-[10px] mt-0.5 font-medium">Verify now →</p>
+                              {/if}
+                              <p class="text-gray-600 text-[10px] mt-0.5 line-clamp-2">{n.body}</p>
+                              <p class="text-gray-400 text-[10px] mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                            </div>
+                            <div class="flex items-center gap-1 shrink-0">
+                              {#if n.link}
+                                <button type="button" class="text-cyan-600 text-[10px] hover:underline cursor-pointer" onclick={() => handleResidentNotificationView(n)}>View</button>
+                              {/if}
+                              <button type="button" class="text-gray-400 hover:text-red-600 p-1 cursor-pointer" aria-label="Delete notification" onclick={(e) => handleResidentNotificationDelete(n.id, e)}>
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
+                              </button>
+                            </div>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
           <div class="relative">
-            <button class="cursor-pointer p-1 touch-manipulation" onclick={() => toggle('menu')} aria-label="Menu">
+            <button
+              class="cursor-pointer p-1 touch-manipulation"
+              onclick={() => {
+                if (mode === 'resident') {
+                  // Toggle sidebar; close profile + both notification panels
+                  residentSidebarOpen = !residentSidebarOpen;
+                  if (!residentSidebarOpen) activeSidebarPanel = null;
+                  openMenu = null;
+                  notificationsOpen = false;
+                  residentNotificationsOpen = false;
+                } else {
+                  toggle('menu');
+                }
+              }}
+              aria-label="Menu"
+            >
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="white" class="w-5 h-5">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
               </svg>
             </button>
-            {#if openMenu === 'menu'}
+            {#if openMenu === 'menu' && mode !== 'resident'}
               <div class="absolute left-0 mt-3 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30 min-w-[200px] md:min-w-[220px]">
                 <div class="p-2">
                   <div class="grid grid-cols-3 gap-1">
                     {#each (mode === 'lgu' && hamburgerMenuItems ? hamburgerMenuItems : menuItems) as item}
                       {#if item.href}
                         <a href={item.href} class="flex flex-col items-center px-3 py-3 hover:bg-gray-50 rounded-lg text-center touch-manipulation">
-                          <div class="w-7 h-7 bg-gray-100 rounded-full mb-1.5"></div>
+                          <div class="w-7 h-7 bg-gray-100 rounded-full mb-1.5 flex items-center justify-center">
+                            {#if item.icon}{@html item.icon}{/if}
+                          </div>
                           <span class="text-[10px] text-[#1B2E3A] font-medium">{item.label}</span>
                         </a>
                       {:else if item.action}
@@ -1527,7 +2487,9 @@
                           class="flex flex-col items-center px-3 py-3 hover:bg-gray-50 rounded-lg text-center touch-manipulation w-full"
                           onclick={() => { item.action?.(); close(); }}
                         >
-                          <div class="w-7 h-7 bg-gray-100 rounded-full mb-1.5"></div>
+                          <div class="w-7 h-7 bg-gray-100 rounded-full mb-1.5 flex items-center justify-center">
+                            {#if item.icon}{@html item.icon}{/if}
+                          </div>
                           <span class="text-[10px] text-[#1B2E3A] font-medium">{item.label}</span>
                         </button>
                       {/if}
@@ -1596,29 +2558,782 @@
         <h1 class="text-sm text-gray-400 tracking-wider select-none" style="font-family: 'Playfair Display SC', serif">
           DISASTERLINK
         </h1>
-        {#if mode === 'lgu'}
-          <p class="text-white text-[10px] sm:text-xs text-center whitespace-nowrap overflow-hidden max-w-[90vw] md:max-w-md text-ellipsis" title="Current Location: {isLocating ? 'Locating…' : locationText} · {lguRole === 'municipal_responder' ? 'Affiliated Municipality' : 'Affiliated Barangay'}: {lguRole === 'municipal_responder' ? (lguMunicipalityName || '—') : (lguBarangayInfo?.name ?? '—')}">
+        {#if mode === 'lgu' || mode === 'resident'}
+          <p class="text-white text-[10px] sm:text-xs text-center whitespace-nowrap overflow-hidden max-w-[90vw] md:max-w-md text-ellipsis">
             <span class="text-white/70">Current Location:</span>
             <span class="text-white/95">{#if isLocating}Locating…{:else}{locationText}{/if}</span>
             <span class="text-white/50 mx-1.5">·</span>
-            <span class="text-white/70">{lguRole === 'municipal_responder' ? 'Affiliated Municipality:' : 'Affiliated Barangay:'}</span>
-            <span class="text-white/95">{lguRole === 'municipal_responder' ? (lguMunicipalityName || '—') : (lguBarangayInfo?.name ?? '—')}</span>
+            {#if mode === 'resident'}
+              <span class="text-white/70">Barangay:</span>
+              <span class="text-white/95">{detectedBarangayName}</span>
+            {:else}
+              <span class="text-white/70">{lguRole === 'municipal_responder' ? 'Affiliated Municipality:' : 'Affiliated Barangay:'}</span>
+              <span class="text-white/95">{lguRole === 'municipal_responder' ? (lguMunicipalityName || '—') : (lguBarangayInfo?.name ?? '—')}</span>
+            {/if}
           </p>
         {/if}
       </div>
-      {#if mode !== 'lgu'}
+      {#if mode === 'guest'}
         <p class="text-white/70 text-[10px] md:text-xs truncate max-w-[100px] sm:max-w-[140px] md:max-w-xs text-right shrink-0 ml-auto">
           {#if isLocating}Locating…{:else}{locationLabel || locationText}{/if}
         </p>
+      {:else if mode === 'resident'}
+        <!-- Search bar lives inside the header for resident mode (right-aligned) -->
+        <div class="relative shrink-0 w-36 sm:w-44 md:w-56 ml-auto">
+          <input
+            type="search"
+            bind:value={searchQuery}
+            oninput={scheduleSearch}
+            onfocus={() => searchQuery && (searchDropdownOpen = true)}
+            placeholder="Search place…"
+            class="w-full h-7 pl-7 pr-3 rounded-xl bg-white/10 text-white placeholder-white/35 border border-white/20 focus:border-white/40 text-[11px] focus:outline-none focus:ring-1 focus:ring-white/20 transition"
+            aria-label="Search for a place"
+          />
+          <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-white/50 pointer-events-none" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+          </svg>
+          {#if isSearching}
+            <svg class="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-white/50 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          {/if}
+          {#if searchDropdownOpen && (searchResults.length > 0 || isSearching)}
+            <div class="absolute top-full right-0 mt-1 w-72 rounded-xl bg-[#0C212F]/95 border border-white/20 shadow-xl backdrop-blur-sm overflow-hidden z-[1001]" role="listbox">
+              {#if isSearching}
+                <div class="px-4 py-3 text-white/50 text-sm">Searching…</div>
+              {:else}
+                {#each searchResults as result}
+                  <button
+                    type="button"
+                    class="w-full px-4 py-3 text-left text-sm text-white/90 hover:bg-white/10 transition truncate focus:outline-none focus:bg-white/10 touch-manipulation"
+                    onclick={() => goToSearchResult(result)}
+                    role="option"
+                    aria-selected="false"
+                  >
+                    {result.displayName}
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          {/if}
+        </div>
       {:else}
         <div class="w-[1px] shrink-0" aria-hidden="true"></div>
       {/if}
     </div>
   </header>
 
+  <!-- ── Resident Quick-Action Toolbar ─────────────────────────────────────────
+       Fixed layout: [←] [Map] [Feed] · [Report(yellow, center)] · [Boundary] [Hazard] [→]
+       Report is always anchored to the center; left/right arrows are shown only
+       when their respective pools overflow beyond 2 visible slots.
+       Outer wrapper is transparent to create a visual gap below the header;
+       the inner pill auto-sizes to its content and floats as a rounded card. -->
+  {#if mode === 'resident'}
+    <!-- Toolbar wrapper: re-centers itself in the visible map area as the sidebar
+         and sub-panel open / close. Sidebar rail ≈ 95px, sub-panel ≈ 340px. -->
+    <div
+      class="absolute top-[3rem] md:top-[3.5rem] -translate-x-1/2 z-[1001] flex flex-col items-center transition-[left] duration-300 ease-in-out"
+      style="left: {residentSidebarOpen && activeSidebarPanel
+        ? 'calc(50% + 218px)'
+        : residentSidebarOpen
+          ? 'calc(50% + 48px)'
+          : '50%'}"
+    >
+
+    {#if toolbarVisible}
+    <!-- 3-column grid: [1fr left group] [auto Report] [1fr right group]
+         Both side groups stretch equally, so Report is always the geometric center.
+         The parent wrapper uses items-center (flex-col) so the toggle tab below
+         aligns precisely under Report. -->
+    <div class="grid grid-cols-[1fr_auto_1fr] items-center px-1.5 py-0.5 mt-2 rounded-2xl bg-[#1c3448] shadow-lg shadow-black/40 border border-white/[0.08]">
+
+      <!-- Left group: arrow + Map + Feed, right-aligned so they hug the Report button -->
+      <div class="flex items-center justify-end gap-0.5">
+        <button
+          class="p-1.5 text-white/30 hover:text-white/70 transition-all touch-manipulation shrink-0 {leftToolbarItems.length <= 2 ? 'opacity-0 pointer-events-none' : ''}"
+          aria-label="Previous left options"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
+          </svg>
+        </button>
+        {#each leftToolbarItems as item (item.id)}
+          {#if item.href}
+            <a
+              href={item.href}
+              title={item.label}
+              aria-label={item.label}
+              class="flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 rounded-xl transition-all touch-manipulation min-w-[56px] {item.active ? 'bg-white/15 text-white ring-1 ring-white/25' : 'text-white/55 hover:bg-white/10 hover:text-white'}"
+            >
+              {@html item.icon}
+              <span class="text-[9px] font-medium leading-none">{item.label}</span>
+            </a>
+          {:else}
+            <button
+              onclick={item.action}
+              title={item.label}
+              aria-label={item.label}
+              class="flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 rounded-xl transition-all touch-manipulation min-w-[56px] cursor-pointer {item.active ? 'bg-white/15 text-white ring-1 ring-white/25' : 'text-white/55 hover:bg-white/10 hover:text-white'}"
+            >
+              {@html item.icon}
+              <span class="text-[9px] font-medium leading-none">{item.label}</span>
+            </button>
+          {/if}
+        {/each}
+      </div>
+
+      <!-- Report: auto-column center — immovable, always visually centered -->
+      <button
+        onclick={openReportPanel}
+        title="Report a hazard or disaster"
+        aria-label="Report a hazard or disaster"
+        class="flex flex-col items-center justify-center gap-0.5 px-5 py-1.5 mx-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-white shadow-lg transition-all cursor-pointer touch-manipulation min-w-[68px]"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+        </svg>
+        <span class="text-[9px] font-bold leading-none">Report</span>
+      </button>
+
+      <!-- Right group: Resources + Hotlines + arrow, left-aligned so they hug Report -->
+      <div class="flex items-center justify-start gap-0.5">
+        {#each rightToolbarItems as item (item.id)}
+          {#if item.href}
+            <a
+              href={item.href}
+              title={item.label}
+              aria-label={item.label}
+              class="flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 rounded-xl transition-all touch-manipulation min-w-[56px] {item.active ? 'bg-white/15 text-white ring-1 ring-white/25' : 'text-white/55 hover:bg-white/10 hover:text-white'}"
+            >
+              {@html item.icon}
+              <span class="text-[9px] font-medium leading-none">{item.label}</span>
+            </a>
+          {:else}
+            <button
+              onclick={item.action}
+              title={item.label}
+              aria-label={item.label}
+              class="flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 rounded-xl transition-all touch-manipulation min-w-[56px] cursor-pointer {item.active ? 'bg-white/15 text-white ring-1 ring-white/25' : 'text-white/55 hover:bg-white/10 hover:text-white'}"
+            >
+              {@html item.icon}
+              <span class="text-[9px] font-medium leading-none">{item.label}</span>
+            </button>
+          {/if}
+        {/each}
+        <button
+          class="p-1.5 text-white/30 hover:text-white/70 transition-all touch-manipulation shrink-0 {rightToolbarItems.length <= 2 ? 'opacity-0 pointer-events-none' : ''}"
+          aria-label="More right options"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4">
+            <path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+          </svg>
+        </button>
+      </div>
+
+    </div>
+    {/if}
+
+    <!-- ── Toolbar toggle tab ────────────────────────────────────────────────────
+         Attached to the bottom of the pill when visible (^ to hide);
+         stands alone just below the header when hidden (v to show). -->
+    <button
+      onclick={() => (toolbarVisible = !toolbarVisible)}
+      class="flex items-center justify-center w-10 h-[14px] mt-1 bg-[#1c3448] rounded-2xl border border-white/[0.08] transition-all cursor-pointer text-white/50 hover:text-white/80 shadow-md shadow-black/40 touch-manipulation"
+      aria-label={toolbarVisible ? 'Hide toolbar' : 'Show toolbar'}
+    >
+      {#if toolbarVisible}
+        <!-- ^ up chevron: click to hide -->
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-3 h-3">
+          <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
+        </svg>
+      {:else}
+        <!-- v down chevron: click to show -->
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-3 h-3">
+          <path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+        </svg>
+      {/if}
+    </button>
+
+    </div>
+  {/if}
+
+  <!-- ── Resident Left Sidebar ──────────────────────────────────────────────────
+       Full-height drawer attached to the left edge. Toggled by the hamburger icon.
+       Options stack vertically (icon on top, label below). Sub-panels (Map Legend,
+       Hazard Layers) open to the right and are scrollable, including a placeholder
+       for future announcements from Mayor / MDRRMO / BDRRMO. -->
+  {#if mode === 'resident' && residentSidebarOpen}
+    <!-- top-12 md:top-14 keeps the sidebar flush below the header without covering it -->
+    <div class="absolute left-0 top-12 md:top-14 bottom-0 z-[1002] flex pointer-events-auto">
+
+
+      <!-- ── Icon rail (main sidebar column) ── -->
+      <div class="flex flex-col bg-[#0C212F] border-r border-white/10 shadow-2xl overflow-y-auto sidebar-scroll overflow-x-hidden py-2 shrink-0">
+
+        <!-- Announcement -->
+        <button
+          onclick={() => (activeSidebarPanel = activeSidebarPanel === 'announcement' ? null : 'announcement')}
+          class="flex flex-col items-center gap-1.5 px-5 py-4 transition-all touch-manipulation cursor-pointer border-r-2 {activeSidebarPanel === 'announcement' ? 'bg-white/15 border-amber-400' : 'border-transparent hover:bg-white/10'}"
+          aria-label="Announcements"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 {activeSidebarPanel === 'announcement' ? 'text-amber-400' : 'text-white/70'}">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.34 15.84c-.688-.06-1.386-.09-2.09-.09H7.5a4.5 4.5 0 1 1 0-9h.75c.704 0 1.402-.03 2.09-.09m0 9.18c.253.962.584 1.892.985 2.783.247.55.06 1.21-.463 1.511l-.657.38c-.551.318-1.26.117-1.527-.461a20.845 20.845 0 0 1-1.44-4.282m3.102.069a18.03 18.03 0 0 1-.59-4.59c0-1.586.205-3.124.59-4.59m0 9.18a23.848 23.848 0 0 1 8.835 2.535M10.34 6.66a23.847 23.847 0 0 1 8.835-2.535m0 0A23.74 23.74 0 0 1 18.795 3m.38 1.125a23.91 23.91 0 0 1 1.014 5.395m-1.014 8.855c-.118.38-.245.754-.38 1.125m.38-1.125a23.91 23.91 0 0 0 1.014-5.395m0-3.46c.495.413.811 1.035.811 1.73 0 .695-.316 1.317-.811 1.73m0-3.46a24.347 24.347 0 0 1 0 3.46" />
+          </svg>
+          <span class="text-xs font-medium leading-tight text-center {activeSidebarPanel === 'announcement' ? 'text-amber-400' : 'text-white/70'}">Announce<br>ments</span>
+        </button>
+
+        <!-- Local Resident Reports -->
+        <button
+          onclick={async () => {
+            if (activeSidebarPanel === 'local-reports') {
+              activeSidebarPanel = null;
+            } else {
+              activeSidebarPanel = 'local-reports';
+              await loadLocalBarangayReports();
+            }
+          }}
+          class="flex flex-col items-center gap-1.5 px-5 py-4 transition-all touch-manipulation cursor-pointer border-r-2 {activeSidebarPanel === 'local-reports' ? 'bg-white/15 border-white/60' : 'border-transparent hover:bg-white/10'}"
+          aria-label="Local Resident Reports"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 {activeSidebarPanel === 'local-reports' ? 'text-white' : 'text-white/70'}">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+          </svg>
+          <span class="text-xs font-medium leading-tight text-center {activeSidebarPanel === 'local-reports' ? 'text-white' : 'text-white/70'}">Local<br>Reports</span>
+        </button>
+
+        <!-- Your Contributions -->
+        <button
+          onclick={async () => {
+            if (activeSidebarPanel === 'contributions') {
+              activeSidebarPanel = null;
+            } else {
+              activeSidebarPanel = 'contributions';
+              await loadUserContributions();
+            }
+          }}
+          title="Your Contributions"
+          class="flex flex-col items-center gap-1.5 px-5 py-4 transition-all border-r-2 {activeSidebarPanel === 'contributions' ? 'bg-white/15 border-white/60 touch-manipulation cursor-pointer' : 'border-transparent hover:bg-white/10 touch-manipulation cursor-pointer'}"
+          aria-label="Your Contributions"
+        >
+          <div class="relative">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 {activeSidebarPanel === 'contributions' ? 'text-white' : 'text-white/70'}">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" />
+            </svg>
+          </div>
+          <span class="text-xs font-medium leading-tight text-center {activeSidebarPanel === 'contributions' ? 'text-white' : 'text-white/70'}">Your<br>Contribs</span>
+        </button>
+
+        <!-- Divider separating community sections from map tools -->
+        <div class="mx-3 my-1 border-t border-white/10 shrink-0"></div>
+
+        <!-- Map Legend -->
+        <button
+          onclick={() => (activeSidebarPanel = activeSidebarPanel === 'legend' ? null : 'legend')}
+          class="flex flex-col items-center gap-1.5 px-5 py-4 transition-all touch-manipulation cursor-pointer border-r-2 {activeSidebarPanel === 'legend' ? 'bg-white/15 border-white/60' : 'border-transparent hover:bg-white/10'}"
+          aria-label="Map Legend"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 {activeSidebarPanel === 'legend' ? 'text-white' : 'text-white/70'}">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+          </svg>
+          <span class="text-xs font-medium leading-tight text-center {activeSidebarPanel === 'legend' ? 'text-white' : 'text-white/70'}">Map<br>Legend</span>
+        </button>
+
+        <!-- Hazard Layers (opens sub-panel) -->
+        <button
+          onclick={() => (activeSidebarPanel = activeSidebarPanel === 'hazard' ? null : 'hazard')}
+          class="flex flex-col items-center gap-1.5 px-5 py-4 transition-all touch-manipulation cursor-pointer border-r-2 {activeSidebarPanel === 'hazard' ? 'bg-white/15 border-white/60' : 'border-transparent hover:bg-white/10'}"
+          aria-label="Hazard Layers"
+        >
+          <div class="relative">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 {activeSidebarPanel === 'hazard' ? 'text-white' : 'text-white/70'}">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6.429 9.75 2.25 12l4.179 2.25m0-4.5 5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L12 12.75 6.429 9.75m11.142 0 4.179 2.25L12 17.25 2.25 12l4.179-2.25m11.142 0 4.179 2.25L12 22.5l-9.75-5.25 4.179-2.25" />
+            </svg>
+            {#if activeLayerCount() > 0}
+              <span class="absolute -top-1 -right-1.5 w-3.5 h-3.5 rounded-full bg-amber-500 text-white text-[7px] font-bold flex items-center justify-center">{activeLayerCount()}</span>
+            {/if}
+          </div>
+          <span class="text-xs font-medium leading-tight text-center {activeSidebarPanel === 'hazard' ? 'text-white' : 'text-white/70'}">Hazard<br>Layers</span>
+        </button>
+
+        <!-- Municipal Boundaries (toggle — existing functionality) -->
+        <button
+          onclick={toggleMinglanillaBorder}
+          class="flex flex-col items-center gap-1.5 px-5 py-4 transition-all touch-manipulation cursor-pointer border-r-2 {minglanillaBorderVisible ? 'bg-white/15 border-blue-400' : 'border-transparent hover:bg-white/10'}"
+          aria-label="Toggle municipal boundaries"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 {minglanillaBorderVisible ? 'text-blue-400' : 'text-white/70'}">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 6.75V15m6-6v8.25m.503 3.498 4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 0 0-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.158.69.158 1.006 0Z" />
+          </svg>
+          <span class="text-xs font-medium leading-tight text-center {minglanillaBorderVisible ? 'text-blue-400' : 'text-white/70'}">Municipal<br>Boundaries</span>
+        </button>
+
+        <!-- Divider before last option -->
+        <div class="mx-3 my-1 border-t border-white/10 shrink-0"></div>
+
+        <!-- Barangay Boundaries — last, no functionality yet -->
+        <button
+          disabled
+          title="Coming soon"
+          class="flex flex-col items-center gap-1.5 px-5 py-4 border-r-2 border-transparent opacity-35 cursor-not-allowed"
+          aria-label="Barangay Boundaries (coming soon)"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-white/70">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
+          </svg>
+          <span class="text-xs font-medium leading-tight text-center text-white/70">Barangay<br>Boundaries</span>
+        </button>
+
+      </div>
+
+      <!-- ── Announcements sub-panel ── -->
+      {#if activeSidebarPanel === 'announcement'}
+        <div class="w-[340px] md:w-[420px] bg-[#081c29] border-r border-white/10 shadow-2xl flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0 bg-[#0C212F]">
+            <span class="text-white text-sm font-semibold">Announcements</span>
+            <button onclick={() => (activeSidebarPanel = null)} class="text-white/50 hover:text-white transition cursor-pointer text-base leading-none" aria-label="Close">&#x2715;</button>
+          </div>
+          <div class="flex-1 overflow-y-auto sidebar-scroll p-4 space-y-4">
+
+            <!-- Filter chips: choose which source to view -->
+            <div>
+              <p class="text-white/40 text-[10px] uppercase tracking-wider mb-2">Filter by source</p>
+              <div class="flex flex-wrap gap-2">
+                {#each ['All', "Mayor's Office", 'MDRRMO', 'BDRRMO'] as source}
+                  <button class="px-3 py-1 rounded-full text-xs font-medium transition cursor-pointer {source === 'All' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-white/5 text-white/50 border border-white/10 hover:bg-white/10'}">
+                    {source}
+                  </button>
+                {/each}
+              </div>
+            </div>
+
+            <!-- Placeholder announcement cards (1-2 recent) -->
+            <div class="space-y-3">
+              <div class="bg-white/5 border border-white/10 rounded-xl p-3.5">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-amber-400 text-xs font-semibold">Mayor's Office</span>
+                  <span class="text-white/30 text-[10px]">No posts yet</span>
+                </div>
+                <p class="text-white/70 text-xs font-medium mb-1">Title</p>
+                <p class="text-white/40 text-xs leading-snug">Description of the announcement will appear here once published.</p>
+              </div>
+              <div class="bg-white/5 border border-white/10 rounded-xl p-3.5">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-blue-400 text-xs font-semibold">MDRRMO</span>
+                  <span class="text-white/30 text-[10px]">No posts yet</span>
+                </div>
+                <p class="text-white/70 text-xs font-medium mb-1">Title</p>
+                <p class="text-white/40 text-xs leading-snug">Description of the announcement will appear here once published.</p>
+              </div>
+            </div>
+
+            <!-- Go to Feed button -->
+            <a
+              href="/resident/feed"
+              class="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-white/10 border border-white/20 text-white/80 text-xs font-semibold hover:bg-white/15 transition"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
+              </svg>
+              View all in Feed
+            </a>
+          </div>
+        </div>
+      {/if}
+
+      <!-- ── Local Resident Reports sub-panel ── -->
+      {#if activeSidebarPanel === 'local-reports'}
+        <div class="w-[340px] md:w-[420px] bg-[#081c29] border-r border-white/10 shadow-2xl flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0 bg-[#0C212F]">
+            <span class="text-white text-sm font-semibold">Local Resident Reports</span>
+            <button onclick={() => (activeSidebarPanel = null)} class="text-white/50 hover:text-white transition cursor-pointer text-base leading-none" aria-label="Close">&#x2715;</button>
+          </div>
+          <div class="flex-1 overflow-y-auto sidebar-scroll p-4 space-y-4">
+            <p class="text-white/50 text-[10px]">Reports in {localReportsBarangayName || 'your barangay'}</p>
+            <div class="flex items-center gap-2">
+              <label for="local-report-sort" class="text-white/50 text-[10px] shrink-0 cursor-pointer">Sort by</label>
+              <select
+                id="local-report-sort"
+                bind:value={localReportSort}
+                class="rounded-lg bg-white/10 text-white text-xs px-2 py-1.5 border border-white/20 focus:outline-none focus:border-white/40 cursor-pointer"
+              >
+                <option value="date-desc" class="text-gray-900 bg-white">Newest first</option>
+                <option value="date-asc" class="text-gray-900 bg-white">Oldest first</option>
+                <option value="engagement" class="text-gray-900 bg-white">Most engagement</option>
+              </select>
+            </div>
+            {#if localBarangayReportsLoading}
+              <div class="flex justify-center py-6">
+                <svg class="animate-spin h-7 w-7 text-white/50" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+              </div>
+            {:else if sortedLocalBarangayReports.length === 0}
+              <div class="flex flex-col items-center justify-center gap-3 py-8 text-center">
+                <div class="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-white/30">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+                  </svg>
+                </div>
+                <div>
+                  <p class="text-white/50 text-xs font-medium">No reports in your barangay yet</p>
+                  <p class="text-white/25 text-[11px] mt-1">
+                    {#if !latitude || !longitude}
+                      Tap "Get My Location" on the map so we can show reports in your current area.
+                    {:else if !localReportsBarangayName}
+                      Reports in your current area will appear here once submitted.
+                    {:else}
+                      Reports submitted by residents in {localReportsBarangayName} will appear here.
+                    {/if}
+                  </p>
+                </div>
+              </div>
+            {:else}
+              <div class="space-y-3">
+                {#each sortedLocalBarangayReports as r (r.id)}
+                  <div class="bg-white/5 border border-white/10 rounded-xl p-3.5 flex gap-3">
+                    <div class="flex-1 min-w-0">
+                      <p class="text-white/50 text-[10px] mb-0.5">{formatContributionDate(r.createdAt)}</p>
+                      <p class="text-white/40 text-[10px] mb-2">{r.barangayName}{r.municipalityName ? `, ${r.municipalityName}` : ''}</p>
+                      <p class="text-white/90 text-xs font-medium line-clamp-1 mb-1.5">{r.title ?? 'Untitled'}</p>
+                      {#if r.description}
+                        <p class="text-white/70 text-xs font-medium leading-snug line-clamp-3 mb-2">{r.description}</p>
+                      {/if}
+                      {#if (r.photoUrls?.length ?? 0) > 0 || (r.videoUrls?.length ?? 0) > 0}
+                        <div class="flex gap-1.5 mb-2 flex-wrap">
+                          {#each (r.photoUrls ?? []).slice(0, 3) as url}
+                            <img src={url} alt="" class="w-12 h-12 rounded object-cover border border-white/10 shrink-0" loading="lazy" />
+                          {/each}
+                          {#each (r.videoUrls ?? []).slice(0, 1) as url}
+                            <div class="w-12 h-12 rounded bg-black/30 border border-white/10 flex items-center justify-center shrink-0">
+                              <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white/70" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                            </div>
+                          {/each}
+                        </div>
+                      {/if}
+                      <div class="flex items-center gap-3 text-white/40 text-[10px]">
+                        <span>{(r.upvoteCount ?? 0)} upvote{(r.upvoteCount ?? 0) !== 1 ? 's' : ''}</span>
+                        <span>{(r.commentCount ?? 0)} comment{(r.commentCount ?? 0) !== 1 ? 's' : ''}</span>
+                      </div>
+                    </div>
+                    <div class="flex flex-col items-end justify-start gap-1 shrink-0">
+                      {#if r.gpsLat != null && r.gpsLng != null}
+                        <button
+                          type="button"
+                          onclick={() => locateReportOnMap(r.id)}
+                          class="px-2 py-1 rounded-full bg-white/10 hover:bg-white/20 text-white/80 text-[10px] font-medium border border-white/20 transition touch-manipulation cursor-pointer"
+                          aria-label="Locate this report on the map"
+                          title="Locate on map"
+                        >
+                          Locate
+                        </button>
+                      {/if}
+                      <button
+                        type="button"
+                        onclick={() => focusReportOnMap(r.id)}
+                        class="px-2 py-1 rounded-full bg-white/10 hover:bg-white/20 text-white/80 text-[10px] font-medium border border-white/20 transition touch-manipulation cursor-pointer"
+                        aria-label="View this report on the map"
+                        title="View details"
+                      >
+                        View
+                      </button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
+      <!-- ── Your Contributions sub-panel ── -->
+      {#if activeSidebarPanel === 'contributions'}
+        <div class="w-[340px] md:w-[420px] bg-[#081c29] border-r border-white/10 shadow-2xl flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0 bg-[#0C212F]">
+            <span class="text-white text-sm font-semibold">Your Contributions</span>
+            <button type="button" onclick={() => (activeSidebarPanel = null)} class="text-white/50 hover:text-white transition cursor-pointer text-base leading-none p-1" aria-label="Close" title="Close">&#x2715;</button>
+          </div>
+          <div class="flex-1 overflow-y-auto sidebar-scroll p-4 space-y-4">
+            <!-- Sort -->
+            <div class="flex items-center gap-2">
+              <label for="contribution-sort" class="text-white/50 text-[10px] shrink-0 cursor-pointer">Sort by</label>
+              <select
+                id="contribution-sort"
+                bind:value={contributionSort}
+                class="contribution-sort-select rounded-lg bg-white/10 text-white text-xs px-2 py-1.5 border border-white/20 focus:outline-none focus:border-white/40 cursor-pointer"
+              >
+                <option value="date-desc" class="text-gray-900 bg-white">Newest first</option>
+                <option value="date-asc" class="text-gray-900 bg-white">Oldest first</option>
+                <option value="engagement" class="text-gray-900 bg-white">Most relevant</option>
+              </select>
+            </div>
+
+            {#if sortedContributions.length === 0}
+              <div class="flex flex-col items-center justify-center gap-3 py-8 text-center">
+                <div class="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-white/30">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" />
+                  </svg>
+                </div>
+                <div>
+                  <p class="text-white/50 text-xs font-medium">No contributions yet</p>
+                  <p class="text-white/25 text-[11px] mt-1">Reports you submit will appear here.</p>
+                </div>
+              </div>
+            {:else}
+              <div class="space-y-3">
+                {#each sortedContributions as r (r.id)}
+                  <div class="bg-white/5 border border-white/10 rounded-xl p-3.5 flex gap-3">
+                    <div class="flex-1 min-w-0">
+                      <p class="text-white/50 text-[10px] mb-0.5">
+                        {formatContributionDate(r.createdAt)}
+                        {#if isReportEdited(r)}
+                          <span class="text-amber-400/90"> (edited)</span>
+                        {/if}
+                      </p>
+                      <p class="text-white/40 text-[10px] mb-2">{r.barangayName}{r.municipalityName ? `, ${r.municipalityName}` : ''}</p>
+                      <p class="text-white/90 text-xs font-medium line-clamp-1 mb-1.5">{r.title ?? 'Untitled'}</p>
+                      {#if r.description}
+                        <p class="text-white/70 text-xs font-medium leading-snug line-clamp-3 mb-2">{r.description}</p>
+                      {/if}
+                      {#if (r.photoUrls?.length ?? 0) > 0 || (r.videoUrls?.length ?? 0) > 0}
+                        <div class="flex gap-1.5 mb-2 flex-wrap">
+                          {#each (r.photoUrls ?? []).slice(0, 3) as url}
+                            <img src={url} alt="" class="w-12 h-12 rounded object-cover border border-white/10 shrink-0" loading="lazy" />
+                          {/each}
+                          {#each (r.videoUrls ?? []).slice(0, 1) as url}
+                            <div class="w-12 h-12 rounded bg-black/30 border border-white/10 flex items-center justify-center shrink-0">
+                              <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white/70" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                            </div>
+                          {/each}
+                        </div>
+                      {/if}
+                      <div class="flex items-center gap-3 text-white/40 text-[10px]">
+                        <span>{(r.upvoteCount ?? 0)} upvote{(r.upvoteCount ?? 0) !== 1 ? 's' : ''}</span>
+                        <span>{(r.commentCount ?? 0)} comment{(r.commentCount ?? 0) !== 1 ? 's' : ''}</span>
+                      </div>
+                    </div>
+                    <div class="flex flex-col items-end justify-start gap-1 shrink-0">
+                      {#if r.gpsLat != null && r.gpsLng != null}
+                        <button
+                          type="button"
+                          onclick={() => locateReportOnMap(r.id)}
+                          class="px-2 py-1 rounded-full bg-white/10 hover:bg-white/20 text-white/80 text-[10px] font-medium border border-white/20 transition touch-manipulation cursor-pointer"
+                          aria-label="Locate this report on the map"
+                          title="Locate on map"
+                        >
+                          Locate
+                        </button>
+                      {/if}
+                      <button
+                        type="button"
+                        onclick={() => focusReportOnMap(r.id)}
+                        class="px-2 py-1 rounded-full bg-white/10 hover:bg-white/20 text-white/80 text-[10px] font-medium border border-white/20 transition touch-manipulation cursor-pointer"
+                        aria-label="View this report on the map"
+                        title="View details"
+                      >
+                        View
+                      </button>
+                      <button type="button" onclick={() => openContributionEdit(r)} class="p-1 rounded hover:bg-white/15 text-white/60 hover:text-white transition cursor-pointer" aria-label="Edit" title="Edit">&#9998;</button>
+                      <button type="button" onclick={() => openContributionDelete(r)} class="p-1 rounded hover:bg-white/15 text-white/60 hover:text-red-400 transition cursor-pointer" aria-label="Delete" title="Delete">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                      </button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
+            <!-- Removed "View all in Feed" to keep residents inside the dashboard -->
+          </div>
+        </div>
+      {/if}
+
+      <!-- Edit contribution modal -->
+      {#if contributionEditReport}
+        <div class="fixed inset-0 z-[1200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" role="dialog" aria-modal="true">
+          <button class="absolute inset-0 cursor-pointer" onclick={closeContributionEdit} aria-label="Close"></button>
+          <div class="relative z-10 w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#0C212F] rounded-xl border border-white/10 shadow-2xl p-4" onclick={(e) => e.stopPropagation()}>
+            <h3 class="text-white font-semibold text-sm mb-3">Edit report</h3>
+            {#if contributionError}<p class="text-amber-400 text-xs mb-2">{contributionError}</p>{/if}
+            <label for="contribution-edit-title" class="block text-white/60 text-[10px] mb-1">Title</label>
+            <input id="contribution-edit-title" type="text" bind:value={contributionEditTitle} class="w-full rounded-lg bg-white/10 text-white text-xs px-3 py-2 border border-white/20 mb-3" />
+            <label for="contribution-edit-desc" class="block text-white/60 text-[10px] mb-1">Description</label>
+            <textarea id="contribution-edit-desc" bind:value={contributionEditDescription} rows="4" class="w-full rounded-lg bg-white/10 text-white text-xs px-3 py-2 border border-white/20 resize-none mb-3"></textarea>
+            <div class="mb-3">
+              <p class="text-white/60 text-[10px] mb-1.5">Photos</p>
+              <div class="flex flex-wrap gap-2 mb-2">
+                {#each contributionEditPhotoUrls as url, i}
+                  <div class="relative shrink-0">
+                    <img src={url} alt="" class="w-14 h-14 rounded-lg object-cover border border-white/20" />
+                    <button type="button" onclick={() => removeContributionEditPhoto(i)} class="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center hover:bg-red-600" aria-label="Remove photo">&times;</button>
+                  </div>
+                {/each}
+                <label class="w-14 h-14 rounded-lg border border-dashed border-white/30 bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition">
+                  <input type="file" accept="image/*" multiple class="hidden" onchange={addContributionEditPhotos} />
+                  <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-white/50" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+                </label>
+              </div>
+            </div>
+            <div class="mb-4">
+              <p class="text-white/60 text-[10px] mb-1.5">Videos</p>
+              <div class="flex flex-wrap gap-2 mb-2">
+                {#each contributionEditVideoUrls as url, i}
+                  <div class="relative shrink-0">
+                    <div class="w-14 h-14 rounded-lg bg-black/30 border border-white/20 flex items-center justify-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-white/70" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                    </div>
+                    <button type="button" onclick={() => removeContributionEditVideo(i)} class="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center hover:bg-red-600" aria-label="Remove video">&times;</button>
+                  </div>
+                {/each}
+                <label class="w-14 h-14 rounded-lg border border-dashed border-white/30 bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition">
+                  <input type="file" accept="video/*" multiple class="hidden" onchange={addContributionEditVideos} />
+                  <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-white/50" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+                </label>
+              </div>
+            </div>
+            <div class="flex gap-2 justify-end">
+              <button type="button" onclick={closeContributionEdit} class="px-3 py-1.5 rounded-lg bg-white/10 text-white/80 text-xs hover:bg-white/20">Cancel</button>
+              <button type="button" onclick={saveContributionEdit} disabled={contributionSaving} class="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs hover:bg-amber-500 disabled:opacity-50">Save</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Delete contribution confirmation -->
+      {#if contributionDeleteReport}
+        <div class="fixed inset-0 z-[1200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" role="dialog" aria-modal="true">
+          <button class="absolute inset-0 cursor-pointer" onclick={closeContributionDelete} aria-label="Close"></button>
+          <div class="relative z-10 w-full max-w-sm bg-[#0C212F] rounded-xl border border-white/10 shadow-2xl p-4" onclick={(e) => e.stopPropagation()}>
+            <h3 class="text-white font-semibold text-sm mb-2">Delete report?</h3>
+            <p class="text-white/70 text-xs mb-4">This cannot be undone. The report "{contributionDeleteReport.title ?? 'Untitled'}" will be permanently removed.</p>
+            {#if contributionDeleteError}<p class="text-amber-400 text-xs mb-3">{contributionDeleteError}</p>{/if}
+            <div class="flex gap-2 justify-end">
+              <button type="button" onclick={closeContributionDelete} class="px-3 py-1.5 rounded-lg bg-white/10 text-white/80 text-xs hover:bg-white/20">Cancel</button>
+              <button type="button" onclick={confirmContributionDelete} disabled={contributionDeleting} class="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs hover:bg-red-500 disabled:opacity-50">Delete</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- ── Map Legend sub-panel ── -->
+      {#if activeSidebarPanel === 'legend'}
+        <div class="w-[340px] md:w-[420px] bg-[#081c29] border-r border-white/10 shadow-2xl flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0 bg-[#0C212F]">
+            <span class="text-white text-sm font-semibold">Map Legend</span>
+            <button onclick={() => (activeSidebarPanel = null)} class="text-white/50 hover:text-white transition cursor-pointer text-base leading-none" aria-label="Close">&#x2715;</button>
+          </div>
+          <!-- Scrollable body: legend items + announcement placeholder -->
+          <div class="flex-1 overflow-y-auto sidebar-scroll p-4 space-y-4">
+            <div>
+              <p class="text-white/50 mb-2 uppercase tracking-wider text-[10px]">Barangay Status</p>
+              <div class="space-y-2">
+                {#each Object.entries(BARANGAY_STATUS_COLORS) as [status, color]}
+                  <div class="flex items-center gap-2">
+                    <span class="w-4 h-4 rounded-sm shrink-0 border border-white/20" style="background-color: {color}"></span>
+                    <span class="text-white/80 text-xs">{BARANGAY_STATUS_LABELS[status as BarangayStatusEnum]}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+            <div>
+              <p class="text-white/50 mb-2 uppercase tracking-wider text-[10px]">Hazard Types</p>
+              <div class="space-y-2">
+                {#each HAZARD_LAYERS as config}
+                  <div class="flex items-center gap-2">
+                    <span class="w-4 h-4 rounded-sm shrink-0 border border-white/20" style="background-color: {config.color}"></span>
+                    <span class="text-white/80 text-xs">{config.label}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+            <div>
+              <p class="text-white/50 mb-2 uppercase tracking-wider text-[10px]">Risk Level</p>
+              <div class="space-y-2">
+                <div class="flex items-center gap-2"><span class="w-4 h-4 rounded-sm bg-white/55 border border-white/20 shrink-0"></span><span class="text-white/80 text-xs">High risk</span></div>
+                <div class="flex items-center gap-2"><span class="w-4 h-4 rounded-sm bg-white/35 border border-white/20 shrink-0"></span><span class="text-white/80 text-xs">Moderate risk</span></div>
+                <div class="flex items-center gap-2"><span class="w-4 h-4 rounded-sm bg-white/18 border border-white/20 shrink-0"></span><span class="text-white/80 text-xs">Low risk</span></div>
+              </div>
+            </div>
+            <div>
+              <p class="text-white/50 mb-2 uppercase tracking-wider text-[10px]">Markers</p>
+              <div class="flex flex-col gap-2">
+                <div class="flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="16" viewBox="0 0 20 26" class="shrink-0">
+                    <path d="M10 0C4.477 0 0 4.477 0 10c0 6.627 10 16 10 16s10-9.373 10-16C20 4.477 15.523 0 10 0z" fill="#1B2E3A" stroke="white" stroke-width="1.5"/>
+                    <circle cx="10" cy="9.5" r="3.5" fill="white" opacity="0.85"/>
+                  </svg>
+                  <span class="text-white/80 text-xs">Current Location</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="16" viewBox="0 0 20 26" class="shrink-0">
+                    <path d="M10 0C4.477 0 0 4.477 0 10c0 6.627 10 16 10 16s10-9.373 10-16C20 4.477 15.523 0 10 0z" fill="#7c3aed" stroke="white" stroke-width="1.5"/>
+                    <circle cx="10" cy="9.5" r="3.5" fill="white" opacity="0.85"/>
+                  </svg>
+                  <span class="text-white/80 text-xs">Search Result</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="w-4 h-4 rounded-full bg-red-600 border-2 border-white shrink-0" style="box-shadow:0 2px 6px rgba(0,0,0,0.35)"></span>
+                  <span class="text-white/80 text-xs">Hazard / Disaster Report</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- ── Hazard Layers sub-panel ── -->
+      {#if activeSidebarPanel === 'hazard'}
+        <div class="w-[340px] md:w-[420px] bg-[#081c29] border-r border-white/10 shadow-2xl flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0 bg-[#0C212F]">
+            <span class="text-white text-sm font-semibold">Hazard Layers</span>
+            <button onclick={() => (activeSidebarPanel = null)} class="text-white/50 hover:text-white transition cursor-pointer text-base leading-none" aria-label="Close">&#x2715;</button>
+          </div>
+          <!-- Scrollable body: layer toggles + risk legend + announcement placeholder -->
+          <div class="flex-1 overflow-y-auto sidebar-scroll">
+            <div class="p-3 space-y-0.5">
+              {#each HAZARD_LAYERS as config}
+                <button
+                  onclick={() => toggleHazardLayer(config.type)}
+                  class="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-colors cursor-pointer text-left touch-manipulation {isHazardActive(config.type) ? 'bg-white/10' : 'hover:bg-white/5'}"
+                >
+                  <span class="w-3.5 h-3.5 rounded-sm shrink-0 border border-white/20" style="background-color:{config.color};opacity:{isHazardActive(config.type) ? 1 : 0.4}"></span>
+                  <span class="text-white/80 text-xs flex-1">{config.label}</span>
+                  {#if loadingHazards[config.type]}
+                    <svg class="animate-spin h-4 w-4 text-white/50 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                    </svg>
+                  {:else if isHazardActive(config.type)}
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4 text-green-400 shrink-0">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                    </svg>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+            <div class="px-4 py-3 border-t border-white/10">
+              <p class="text-white/40 text-xs mb-2">Risk Level (opacity)</p>
+              <div class="flex flex-wrap gap-3">
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-white/55 shrink-0"></span><span class="text-white/50 text-xs">High</span></div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-white/35 shrink-0"></span><span class="text-white/50 text-xs">Moderate</span></div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-white/18 shrink-0"></span><span class="text-white/50 text-xs">Low</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+    </div>
+  {/if}
+
   <div class="flex-1 relative min-h-0 map-dashboard-wrapper" onclick={handleMapContainerClick} role="presentation">
     <div bind:this={mapElement} class="absolute inset-0 z-0"></div>
 
+    {#if mode !== 'resident'}
     <div class="absolute top-3 left-3 right-3 md:left-auto md:right-4 md:w-72 z-[1000]">
       <div class="relative">
         <input
@@ -1660,13 +3375,18 @@
         </div>
       {/if}
     </div>
+    {/if}
 
     {#if searchDropdownOpen}
-      <button class="fixed inset-0 z-[999] cursor-default" onclick={() => (searchDropdownOpen = false)} aria-label="Close search"></button>
+      <!-- z-[49] keeps this below the header stacking context (z-50) so the
+           resident search dropdown inside the header remains clickable. -->
+      <button class="fixed inset-0 z-[49] cursor-default" onclick={() => (searchDropdownOpen = false)} aria-label="Close search"></button>
     {/if}
 
     <div class="absolute bottom-4 left-4 right-4 md:left-auto md:right-4 md:bottom-4 md:right-4 flex flex-col-reverse gap-2 z-[1000] pointer-events-none">
-      <div class="flex flex-wrap gap-2 pointer-events-auto justify-end md:justify-start">
+      <!-- items-end aligns Get My Location to the bottom of the zoom+fullscreen column in resident mode -->
+      <div class="flex flex-wrap gap-2 pointer-events-auto justify-end md:justify-start items-end">
+        {#if mode !== 'resident'}
         <button
           onclick={toggleMinglanillaBorder}
           class="flex items-center gap-2 px-4 py-3 md:px-4 md:py-2.5 bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white text-sm font-medium rounded-xl shadow-lg backdrop-blur-sm transition-all cursor-pointer touch-manipulation min-h-[44px] md:min-h-0 {minglanillaBorderVisible ? 'ring-2 ring-blue-400' : ''}"
@@ -1678,43 +3398,88 @@
           </svg>
           <span class="hidden sm:inline">Minglanilla Border</span>
         </button>
+        {/if}
 
         <button
           onclick={getMyLocation}
           disabled={isLocating}
-          class="flex items-center gap-2 px-4 py-3 md:px-5 md:py-2.5 bg-[#0C212F]/90 hover:bg-[#1B2E3A] disabled:bg-gray-600 text-white text-sm font-medium rounded-xl shadow-lg backdrop-blur-sm transition-all cursor-pointer disabled:cursor-not-allowed touch-manipulation min-h-[44px] md:min-h-0"
+          aria-label="Get My Location"
+          class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#0C212F]/90 hover:bg-[#1B2E3A] disabled:bg-gray-600 text-white text-sm font-medium shadow-lg backdrop-blur-sm transition-all cursor-pointer disabled:cursor-not-allowed touch-manipulation min-h-[44px] md:min-h-0"
         >
           {#if isLocating}
-            <svg class="animate-spin h-5 w-5 md:h-4 md:w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <svg class="animate-spin w-4 h-4 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
             </svg>
             <span>Locating…</span>
           {:else}
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 shrink-0">
               <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
               <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
             </svg>
-            <span class="hidden sm:inline">Get My Location</span>
+            <span>Get My Location</span>
           {/if}
         </button>
 
-        <button
-          onclick={toggleFullscreen}
-          class="p-3 md:p-2.5 rounded-xl bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white shadow-lg backdrop-blur-sm transition-all touch-manipulation min-h-[44px] md:min-h-0 min-w-[44px] md:min-w-0"
-          aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-        >
-          {#if isFullscreen}
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-            </svg>
-          {:else}
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9m5.25-5.25h4.5m0 4.5V9m0 10.5v-4.5m4.5 4.5H9m10.5 0v-4.5m0 4.5L15 15" />
-            </svg>
-          {/if}
-        </button>
+        {#if mode === 'resident'}
+          <!-- Resident: zoom in, zoom out, then fullscreen — all stacked in one column
+               so the order bottom-to-top reads: fullscreen → zoom− → zoom+.
+               Fullscreen is at the very bottom, zoom controls sit just above it. -->
+          <div class="flex flex-col gap-1">
+            <button
+              onclick={() => map?.zoomIn()}
+              class="p-3 md:p-2.5 rounded-xl bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white shadow-lg backdrop-blur-sm transition-all touch-manipulation min-h-[44px] md:min-h-[36px] min-w-[44px] md:min-w-[36px] flex items-center justify-center"
+              aria-label="Zoom in"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+            </button>
+            <button
+              onclick={() => map?.zoomOut()}
+              class="p-3 md:p-2.5 rounded-xl bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white shadow-lg backdrop-blur-sm transition-all touch-manipulation min-h-[44px] md:min-h-[36px] min-w-[44px] md:min-w-[36px] flex items-center justify-center"
+              aria-label="Zoom out"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12h-15" />
+              </svg>
+            </button>
+            <button
+              onclick={toggleFullscreen}
+              class="p-3 md:p-2.5 rounded-xl bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white shadow-lg backdrop-blur-sm transition-all touch-manipulation min-h-[44px] md:min-h-[36px] min-w-[44px] md:min-w-[36px] flex items-center justify-center"
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            >
+              {#if isFullscreen}
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+                </svg>
+              {:else}
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9m5.25-5.25h4.5m0 4.5V9m0 10.5v-4.5m4.5 4.5H9m10.5 0v-4.5m0 4.5L15 15" />
+                </svg>
+              {/if}
+            </button>
+          </div>
+        {:else}
+          <!-- Non-resident: standalone fullscreen button as before -->
+          <button
+            onclick={toggleFullscreen}
+            class="p-3 md:p-2.5 rounded-xl bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white shadow-lg backdrop-blur-sm transition-all touch-manipulation min-h-[44px] md:min-h-0 min-w-[44px] md:min-w-0"
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+          >
+            {#if isFullscreen}
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+              </svg>
+            {:else}
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 md:w-4 md:h-4">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9m5.25-5.25h4.5m0 4.5V9m0 10.5v-4.5m4.5 4.5H9m10.5 0v-4.5m0 4.5L15 15" />
+              </svg>
+            {/if}
+          </button>
+        {/if}
 
+        {#if mode !== 'resident'}
         <button
           onclick={() => (hazardPanelOpen = !hazardPanelOpen)}
           class="p-3 md:p-2.5 rounded-xl bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white shadow-lg backdrop-blur-sm transition-all touch-manipulation flex items-center gap-1.5 min-h-[44px] md:min-h-0"
@@ -1737,6 +3502,7 @@
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
           </svg>
         </button>
+        {/if}
       </div>
       {#if mode === 'lgu' && lguBarangayInfo?.id}
         <div class="flex justify-end pointer-events-auto w-full md:w-auto">
@@ -1982,7 +3748,7 @@
       </div>
     {/if}
 
-    {#if reportPanelOpen && lguBarangayInfo}
+    {#if reportPanelOpen && (lguBarangayInfo || mode === 'resident')}
       <div
         class="fixed inset-0 z-[1100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         role="dialog"
@@ -2018,7 +3784,15 @@
             <div class="absolute inset-0 bg-gradient-to-t from-[#0C212F] via-[#0C212F]/80 to-transparent"></div>
             <div class="relative p-4 pt-10">
               <h2 id="report-create-title" class="text-white font-semibold text-base">Report Hazard / Disaster</h2>
-              <p class="text-white/70 text-xs mt-0.5">{lguBarangayInfo.name}, {lguMunicipalityName || 'Minglanilla'}</p>
+              <p class="text-white/70 text-xs mt-0.5">
+                {#if mode === 'resident'}
+                  {reportBarangayId
+                    ? reportBarangayName + ', Minglanilla'
+                    : 'Not within a barangay boundary'}
+                {:else}
+                  {(lguBarangayInfo?.name ?? '') + ', ' + (lguMunicipalityName || 'Minglanilla')}
+                {/if}
+              </p>
             </div>
           </div>
           <div class="p-4 overflow-y-auto flex-1 space-y-3 max-h-[60vh] scrollbar-hide">
@@ -2040,7 +3814,7 @@
               </div>
             {/if}
             <div>
-              <label for="report-title" class="block text-white/60 text-[10px] mb-1">Title <span class="text-amber-400">*</span></label>
+              <label for="report-title" class="block text-white/60 text-[10px] mb-1">Title</label>
               <input
                 id="report-title"
                 type="text"
@@ -2050,7 +3824,7 @@
               />
             </div>
             <div>
-              <label for="report-desc" class="block text-white/60 text-[10px] mb-1">Description <span class="text-amber-400">*</span></label>
+              <label for="report-desc" class="block text-white/60 text-[10px] mb-1">Description</label>
               <div class="rounded-lg border border-white/20 bg-white/5 overflow-hidden">
                 <textarea
                   id="report-desc"
@@ -2059,7 +3833,7 @@
                   rows="4"
                   class="w-full bg-transparent text-white text-xs px-3 py-2 placeholder-white/40 focus:outline-none resize-none border-none"
                 ></textarea>
-                <div class="px-3 pb-3 pt-0 flex flex-wrap items-center gap-2 border-t border-white/10">
+                <div class="px-3 pb-3 pt-3 flex flex-wrap items-center gap-2 border-t border-white/10">
                   <input
                     id="report-photos"
                     type="file"
@@ -2081,18 +3855,18 @@
                   <button
                     type="button"
                     onclick={() => document.getElementById('report-photos')?.click()}
-                    class="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white/80 transition"
+                    class="report-media-btn w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-white/80 transition-colors cursor-pointer border border-transparent hover:bg-amber-500/25 hover:border-amber-400/40 hover:text-amber-300"
                     aria-label="Add photos"
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
                   </button>
                   <button
                     type="button"
                     onclick={() => document.getElementById('report-videos')?.click()}
-                    class="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white/80 transition"
+                    class="report-media-btn w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-white/80 transition-colors cursor-pointer border border-transparent hover:bg-amber-500/25 hover:border-amber-400/40 hover:text-amber-300"
                     aria-label="Add videos"
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
                   </button>
                   {#if reportPhotoFiles.length > 0 || reportVideoFiles.length > 0}
                     <div class="flex flex-wrap gap-2 ml-1">
@@ -2128,7 +3902,7 @@
               </button>
               <button
                 onclick={submitReport}
-                disabled={isSubmittingReport || latitude == null || longitude == null || reportTitle.trim().length < 2 || reportDescription.trim().length < 5}
+                disabled={isSubmittingReport || latitude == null || longitude == null || reportTitle.trim().length < 2 || reportDescription.trim().length < 5 || (mode === 'resident' && !reportBarangayId)}
                 class="flex-1 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white text-xs font-medium rounded-lg transition cursor-pointer"
               >
                 {isSubmittingReport ? 'Submitting…' : 'Submit Report'}
@@ -2371,7 +4145,7 @@
       </div>
     {/if}
 
-    {#if hazardPanelOpen}
+    {#if hazardPanelOpen && mode !== 'resident'}
       <div class="absolute bottom-24 left-4 right-4 md:left-auto md:right-4 md:w-56 z-[1000] bg-[#0C212F]/95 backdrop-blur-sm rounded-xl shadow-lg overflow-hidden">
         <div class="flex items-center justify-between px-3 py-2.5 border-b border-white/10">
           <span class="text-white text-xs font-semibold tracking-wide">Hazard Layers</span>
@@ -2409,7 +4183,7 @@
       </div>
     {/if}
 
-    {#if legendOpen}
+    {#if legendOpen && mode !== 'resident'}
       <div class="absolute bottom-24 md:bottom-4 left-4 right-4 md:right-auto md:w-52 z-[1000] bg-[#0C212F]/95 backdrop-blur-sm rounded-xl shadow-lg overflow-hidden border border-white/10">
         <div class="flex items-center justify-between px-3 py-2.5 border-b border-white/10">
           <span class="text-white text-xs font-semibold">Map Legend</span>
@@ -2457,14 +4231,27 @@
           </div>
           <div>
             <p class="text-white/50 mb-2 uppercase tracking-wider">Markers</p>
-            <div class="flex flex-col gap-1.5">
+            <div class="flex flex-col gap-2">
+              <!-- Current location pin: system navy teardrop -->
               <div class="flex items-center gap-2">
-                <img src="https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png" alt="" class="w-4 h-6 object-contain" />
-                <span class="text-white/80">Your location / Search result</span>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="18" viewBox="0 0 20 26" class="shrink-0">
+                  <path d="M10 0C4.477 0 0 4.477 0 10c0 6.627 10 16 10 16s10-9.373 10-16C20 4.477 15.523 0 10 0z" fill="#1B2E3A" stroke="white" stroke-width="1.5"/>
+                  <circle cx="10" cy="9.5" r="3.5" fill="white" opacity="0.85"/>
+                </svg>
+                <span class="text-white/80">Current Location</span>
               </div>
+              <!-- Search result pin: violet teardrop -->
               <div class="flex items-center gap-2">
-                <span class="w-4 h-4 rounded-full bg-red-600 border-2 border-white shrink-0" style="box-shadow: 0 1px 3px rgba(0,0,0,0.3)"></span>
-                <span class="text-white/80">Hazard / Disaster report</span>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="18" viewBox="0 0 20 26" class="shrink-0">
+                  <path d="M10 0C4.477 0 0 4.477 0 10c0 6.627 10 16 10 16s10-9.373 10-16C20 4.477 15.523 0 10 0z" fill="#7c3aed" stroke="white" stroke-width="1.5"/>
+                  <circle cx="10" cy="9.5" r="3.5" fill="white" opacity="0.85"/>
+                </svg>
+                <span class="text-white/80">Search Result</span>
+              </div>
+              <!-- Hazard / Disaster report: small red circle -->
+              <div class="flex items-center gap-2">
+                <span class="w-4 h-4 rounded-full bg-red-600 border-2 border-white shrink-0" style="box-shadow: 0 2px 6px rgba(0,0,0,0.35)"></span>
+                <span class="text-white/80">Hazard / Disaster Report</span>
               </div>
             </div>
           </div>
@@ -2473,7 +4260,6 @@
     {/if}
 
     {#if selectedReport}
-      {@const canInteract = signedInUserId && signedInUserId !== selectedReport.reporterId}
       <div
         class="fixed inset-0 z-[1100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         role="dialog"
@@ -2488,7 +4274,7 @@
           aria-label="Close dialog"
         ></button>
         <div
-          class="relative z-10 w-full max-w-md max-h-[90vh] flex flex-col bg-[#0C212F] rounded-xl shadow-2xl border border-white/10 overflow-hidden"
+          class="relative z-10 w-full max-w-xl max-h-[90vh] flex flex-col bg-[#1B2E3A] rounded-2xl shadow-2xl border border-white/10 overflow-hidden"
           onclick={(e) => e.stopPropagation()}
           role="document"
         >
@@ -2499,36 +4285,41 @@
           >
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
           </button>
-            <div class="relative min-h-[120px] overflow-hidden">
-              <div
-                class="absolute inset-0 bg-cover bg-center"
-                style={selectedReport.profileImageUrl
-                  ? `background-image: url('${selectedReport.profileImageUrl}'); filter: brightness(0.75);`
-                  : 'background-image: linear-gradient(135deg, #1B2E3A 0%, #0C212F 100%); filter: brightness(0.75);'}
-              ></div>
-            <div class="absolute inset-0 bg-gradient-to-t from-[#0C212F] via-[#0C212F]/80 to-transparent"></div>
-            <div class="relative p-4 pt-12">
-              <h2 id="report-detail-title" class="text-white font-semibold text-base">{selectedReport.title ?? 'Report'}</h2>
-              <p class="text-white/70 text-xs mt-0.5">{selectedReport.barangayName}, {selectedReport.municipalityName}</p>
-              <span class="text-white/50 text-[10px]">{new Date(selectedReport.createdAt).toLocaleString()}</span>
-            </div>
-          </div>
-          <div class="p-4 overflow-y-auto flex-1 space-y-4 scrollbar-hide">
-            <div class="flex items-center gap-2">
+
+          <!-- Feed-style header: icon + name, then location + publish date -->
+          <div class="p-4 pb-3">
+            <div class="flex items-start gap-3">
               {#if selectedReport.publisherAvatarUrl}
-                <img src={selectedReport.publisherAvatarUrl} alt="" class="w-9 h-9 rounded-full border-2 border-white/30 object-cover shrink-0" />
+                <img src={selectedReport.publisherAvatarUrl} alt="" class="w-10 h-10 rounded-full border border-white/10 object-cover shrink-0" />
               {:else}
-                <div class="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center text-white font-semibold text-sm shrink-0">
-                  {selectedReport.publisherName.charAt(0).toUpperCase()}
+                <div class="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white text-xs font-bold border border-white/10 shrink-0">
+                  {initialsFromName(selectedReport.publisherName)}
                 </div>
               {/if}
-              <span class="text-white/90 text-xs font-medium">{selectedReport.publisherName}</span>
+              <div class="flex-1 min-w-0">
+                <h2 id="report-detail-title" class="text-white text-sm font-semibold leading-tight truncate">{selectedReport.publisherName}</h2>
+                <p class="text-white/50 text-[11px] mt-0.5 truncate">
+                  {selectedReport.barangayName}{selectedReport.municipalityName ? `, ${selectedReport.municipalityName}` : ''}
+                  <span class="mx-1 text-white/30">·</span>
+                  {timeAgo(selectedReport.createdAt)}
+                  {#if isReportEdited(selectedReport)}
+                    <span class="ml-1 text-amber-300 text-[10px] font-medium">(edited)</span>
+                  {/if}
+                </p>
+              </div>
             </div>
-            {#if selectedReport.description}
-              <p class="text-white/80 text-sm leading-relaxed">{selectedReport.description}</p>
+            {#if selectedReport.title || selectedReport.description}
+              <div class="mt-3">
+                {#if selectedReport.title}
+                  <p class="text-white text-sm font-medium mb-1">{selectedReport.title}</p>
+                {/if}
+                {#if selectedReport.description}
+                  <p class="text-white/70 text-sm leading-relaxed">{selectedReport.description}</p>
+                {/if}
+              </div>
             {/if}
             {#if selectedReport.photoUrls.length > 0 || selectedReport.videoUrls.length > 0}
-              <div class="space-y-2">
+              <div class="mt-3 space-y-2">
                 {#if selectedReport.photoUrls.length > 0}
                   <div class="flex flex-wrap gap-2">
                     {#each selectedReport.photoUrls as url}
@@ -2539,49 +4330,278 @@
                   </div>
                 {/if}
                 {#if selectedReport.videoUrls.length > 0}
-                  <div class="space-y-2">
-                    {#each selectedReport.videoUrls as url}
-                      <video src={url} controls class="w-full max-h-40 rounded-lg border border-white/10" preload="metadata" aria-label="Report video"><track kind="captions" src="" srclang="en" label="No captions" /></video>
+                  {#each selectedReport.videoUrls as url}
+                    <video src={url} controls class="w-full max-h-40 rounded-lg border border-white/10" preload="metadata" aria-label="Report video"><track kind="captions" src="" srclang="en" label="No captions" /></video>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
+          </div>
+
+          <div class="mx-4 border-t border-white/10"></div>
+
+          <!-- Comments: 2 initial top-level, View more (+5); 2 replies per comment, View more replies (+5) -->
+          {#if getSelectedReportTopLevelNotes().length > 0}
+            <div class="px-4 pt-3 pb-1 space-y-2 overflow-y-auto flex-1 min-h-0 sidebar-scroll">
+              {#each getSelectedReportTopLevelNotes().slice(0, selectedReportCommentVisibleTopCount) as note (note.id)}
+                <div class="space-y-1.5">
+                  <div class="flex items-start gap-2">
+                    <div class="w-8 h-8 rounded-full bg-white/15 flex items-center justify-center text-white text-[10px] font-semibold shrink-0">
+                      {initialsFromName(note.authorName)}
+                    </div>
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-center gap-2 text-[11px]">
+                        <span class="text-white/90 font-medium truncate max-w-[140px]">{note.authorName}</span>
+                        <span class="text-white/30 text-[10px]">{timeAgo(note.createdAt)}</span>
+                      </div>
+                      <p class="text-white/80 text-xs leading-snug mt-0.5 break-words">{note.body}</p>
+                      {#if note.photoUrls?.length}
+                        <div class="mt-1 flex flex-wrap gap-1.5">
+                          {#each note.photoUrls as url}
+                            <a href={url} target="_blank" rel="noopener noreferrer" class="block">
+                              <img src={url} alt="" class="w-14 h-14 rounded-md border border-white/10 object-cover hover:border-white/30 transition" loading="lazy" />
+                            </a>
+                          {/each}
+                        </div>
+                      {/if}
+                      {#if signedInUserId}
+                        <button
+                          type="button"
+                          class="mt-1 text-[10px] font-medium text-white/50 hover:text-white/80 transition touch-manipulation cursor-pointer"
+                          onclick={() => startSelectedReportReply(note.id)}
+                        >
+                          Reply
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                  {#each getSelectedReportRepliesForNote(note.id).slice(0, selectedReportReplyVisibleCounts[note.id] ?? 2) as reply (reply.id)}
+                    <div class="mt-1 ml-8 pl-3 border-l border-white/10 flex items-start gap-2">
+                      <div class="w-7 h-7 rounded-full bg-white/10 flex items-center justify-center text-white text-[9px] font-semibold shrink-0">
+                        {initialsFromName(reply.authorName)}
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 text-[10px]">
+                          <span class="text-white/85 font-medium truncate max-w-[120px]">{reply.authorName}</span>
+                          <span class="text-white/30">{timeAgo(reply.createdAt)}</span>
+                        </div>
+                        <p class="text-white/80 text-[11px] leading-snug mt-0.5 break-words">{reply.body}</p>
+                        {#if reply.photoUrls?.length}
+                          <div class="mt-1 flex flex-wrap gap-1.5">
+                            {#each reply.photoUrls as url}
+                              <a href={url} target="_blank" rel="noopener noreferrer" class="block">
+                                <img src={url} alt="" class="w-12 h-12 rounded-md border border-white/10 object-cover hover:border-white/30 transition" loading="lazy" />
+                              </a>
+                            {/each}
+                          </div>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                  {#if selectedReportReplyTarget === note.id && signedInUserId}
+                    <div class="mt-1 ml-8 pl-3 flex items-start gap-2">
+                      <div class="w-7 h-7 rounded-full bg-white/15 flex items-center justify-center text-white text-[9px] font-semibold shrink-0">
+                        {userInitials || 'R'}
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <input
+                          type="text"
+                          placeholder="Reply to {note.authorName}…"
+                          value={selectedReportReplyDrafts[note.id] ?? ''}
+                          oninput={(e) => {
+                            const v = (e.target as HTMLInputElement).value;
+                            selectedReportReplyDrafts = { ...selectedReportReplyDrafts, [note.id]: v };
+                          }}
+                          class="w-full bg-[#0C212F]/60 text-white/80 placeholder-white/30 text-[11px] px-3 py-1.5 rounded-full border border-white/10 focus:outline-none focus:border-white/30"
+                          aria-label="Write a reply"
+                          onkeydown={(event) => {
+                            const e = event as KeyboardEvent;
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              const draft = (selectedReportReplyDrafts[note.id] ?? '').trim();
+                              if (draft.length >= 2 && !selectedReportSubmittingReplyFor) void submitSelectedReportReply(note.id);
+                            }
+                          }}
+                        />
+                        {#if (selectedReportReplyPhotos[note.id]?.length ?? 0) > 0}
+                          <div class="mt-1 flex flex-wrap gap-1">
+                            {#each selectedReportReplyPhotos[note.id] ?? [] as url (url)}
+                              <div class="relative w-9 h-9 rounded-md overflow-hidden border border-white/10">
+                                <img src={url} alt="" class="w-full h-full object-cover" loading="lazy" />
+                                <button
+                                  type="button"
+                                  class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-black/70 text-white text-[9px] flex items-center justify-center hover:bg-black"
+                                  aria-label="Remove attached photo"
+                                  onclick={() => removeSelectedReportReplyPhoto(note.id, url)}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            {/each}
+                          </div>
+                        {/if}
+                      </div>
+                      <div class="flex items-center gap-1 shrink-0">
+                        <label
+                          class="p-1.5 rounded-full hover:bg-white/10 transition touch-manipulation text-white/60 hover:text-white/90 cursor-pointer"
+                          aria-label="Image / Video"
+                          title="Image / Video"
+                        >
+                          <input
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            class="hidden"
+                            onchange={async (event) => {
+                              const input = event.target as HTMLInputElement;
+                              const files = Array.from(input.files ?? []);
+                              input.value = '';
+                              for (const file of files) {
+                                const url = await uploadReportPhoto(file);
+                                if (url) selectedReportReplyPhotos = { ...selectedReportReplyPhotos, [note.id]: [...(selectedReportReplyPhotos[note.id] ?? []), url] };
+                              }
+                            }}
+                          />
+                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75A2.25 2.25 0 016 4.5h12a2.25 2.25 0 012.25 2.25v9.75A2.25 2.25 0 0118 18.75H6A2.25 2.25 0 013.75 16.5V6.75z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12.75l2.9-2.9a1.5 1.5 0 012.12 0l2.9 2.9M13.5 11.25l1.15-1.15a1.5 1.5 0 012.12 0l1.73 1.73" />
+                          </svg>
+                        </label>
+                        <button
+                          type="button"
+                          class="p-1.5 rounded-full hover:bg-white/10 transition touch-manipulation text-white/60 hover:text-white/90 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                          aria-label="Submit reply"
+                          disabled={selectedReportSubmittingReplyFor === note.id}
+                          onclick={() => submitSelectedReportReply(note.id)}
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  {/if}
+                  {#if getSelectedReportRepliesForNote(note.id).length > (selectedReportReplyVisibleCounts[note.id] ?? Math.min(2, getSelectedReportRepliesForNote(note.id).length))}
+                    <button
+                      type="button"
+                      class="mt-1 ml-8 pl-3 text-[9px] font-medium text-white/55 hover:text-white/85 transition touch-manipulation cursor-pointer"
+                      onclick={() => showMoreSelectedReportReplies(note.id)}
+                    >
+                      View more replies
+                    </button>
+                  {/if}
+                </div>
+              {/each}
+              {#if getSelectedReportTopLevelNotes().length > selectedReportCommentVisibleTopCount}
+                <button
+                  type="button"
+                  class="mt-1 mb-2 text-[10px] font-medium text-white/60 hover:text-white/85 transition touch-manipulation cursor-pointer"
+                  onclick={showMoreSelectedReportComments}
+                >
+                  View more comments
+                </button>
+              {/if}
+            </div>
+          {/if}
+
+          <!-- Bottom action bar: comment input + comment count + photo + upvote (same as feed; always allow when signed in) -->
+          <div class="p-4 pt-3 border-t border-white/10 flex items-center gap-2">
+            {#if signedInUserId}
+              <div class={selectedReportActiveCommentFocus ? 'basis-4/5' : 'basis-2/3'}>
+                <input
+                  type="text"
+                  placeholder="Write a comment…"
+                  bind:value={selectedReportCommentDraft}
+                  class="w-full bg-[#0C212F]/60 text-white/80 placeholder-white/30 text-xs px-4 py-2 rounded-full border border-white/10 focus:outline-none focus:border-white/30 focus:ring-1 focus:ring-white/20 transition"
+                  aria-label="Write a comment"
+                  onfocus={() => (selectedReportActiveCommentFocus = true)}
+                  onblur={() => {
+                    if (!selectedReportCommentDraft.trim()) selectedReportActiveCommentFocus = false;
+                  }}
+                  onkeydown={(event) => {
+                    const e = event as KeyboardEvent;
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (selectedReportCommentDraft.trim().length >= 2 && !selectedReportSubmitting) void submitSelectedReportComment();
+                    }
+                  }}
+                />
+                {#if selectedReportCommentPhotos.length > 0}
+                  <div class="mt-1 flex flex-wrap gap-1">
+                    {#each selectedReportCommentPhotos as url (url)}
+                      <div class="relative w-10 h-10 rounded-md overflow-hidden border border-white/10">
+                        <img src={url} alt="" class="w-full h-full object-cover" loading="lazy" />
+                        <button
+                          type="button"
+                          class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-black/70 text-white text-[9px] flex items-center justify-center hover:bg-black"
+                          aria-label="Remove attached photo"
+                          onclick={() => removeSelectedReportCommentPhoto(url)}
+                        >
+                          ×
+                        </button>
+                      </div>
                     {/each}
                   </div>
                 {/if}
               </div>
-            {/if}
-            <div class="flex items-center gap-4 pt-2 border-t border-white/10">
-              {#if !signedInUserId}
-                <p class="text-white/50 text-xs">Sign up to upvote or comment.</p>
-              {:else if !canInteract}
-                <p class="text-white/50 text-xs">You can't upvote or comment your own report.</p>
-              {:else}
-                <button
-                  type="button"
-                  class="flex items-center gap-1.5 text-white/70 hover:text-white/90 transition text-xs"
-                  aria-label="Upvote"
+              <div class="flex items-center justify-start gap-1 ml-2 shrink-0">
+                {#if !selectedReportActiveCommentFocus}
+                  <div class="flex items-center gap-0.5">
+                    <button
+                      class="p-1.5 rounded-full hover:bg-white/10 transition touch-manipulation text-white/60 hover:text-white/90 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                      aria-label="Submit comment"
+                      title="Comment"
+                      disabled={selectedReportSubmitting}
+                      onclick={() => submitSelectedReportComment()}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
+                      </svg>
+                    </button>
+                    <span class="text-white/50 text-[10px]">{selectedReportComments.length}</span>
+                  </div>
+                {/if}
+                <label
+                  class="p-1.5 rounded-full hover:bg-white/10 transition touch-manipulation text-white/60 hover:text-white/90 cursor-pointer"
+                  aria-label="Image / Video"
+                  title="Image / Video"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" /></svg>
-                  <span>Upvote</span>
-                </button>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    class="hidden"
+                    onchange={async (event) => {
+                      const input = event.target as HTMLInputElement;
+                      const files = Array.from(input.files ?? []);
+                      input.value = '';
+                      for (const file of files) {
+                        const url = await uploadReportPhoto(file);
+                        if (url) selectedReportCommentPhotos = [...selectedReportCommentPhotos, url];
+                      }
+                    }}
+                  />
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75A2.25 2.25 0 016 4.5h12a2.25 2.25 0 012.25 2.25v9.75A2.25 2.25 0 0118 18.75H6A2.25 2.25 0 013.75 16.5V6.75z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12.75l2.9-2.9a1.5 1.5 0 012.12 0l2.9 2.9M13.5 11.25l1.15-1.15a1.5 1.5 0 012.12 0l1.73 1.73" />
+                  </svg>
+                </label>
                 <button
-                  type="button"
-                  class="flex items-center gap-1.5 text-white/70 hover:text-white/90 transition text-xs"
-                  aria-label="Comment"
+                  class="flex items-center gap-0.5 p-1.5 rounded-full hover:bg-white/10 transition touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer {selectedReportHasUpvoted ? 'text-amber-300' : 'text-white/60 hover:text-orange-400'}"
+                  aria-label="Upvotes"
+                  title="Upvotes"
+                  disabled={selectedReportTogglingUpvote}
+                  onclick={() => toggleSelectedReportUpvote()}
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
-                  <span>Comment</span>
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18" />
+                  </svg>
+                  <span class="text-[10px]">{selectedReport.upvoteCount ?? 0}</span>
                 </button>
-              {/if}
-            </div>
-            {#if canInteract}
-              <div class="rounded-lg bg-white/5 border border-white/10 px-3 py-2">
-                <p class="text-white/40 text-[11px]">Add a comment… (coming soon)</p>
               </div>
+            {:else}
+              <p class="text-white/50 text-[11px]">Sign in to upvote or comment.</p>
             {/if}
-            <button
-              type="button"
-              class="w-full py-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white/90 text-xs font-medium transition border border-white/10"
-            >
-              Show local feed report
-            </button>
           </div>
         </div>
       </div>
@@ -2600,7 +4620,7 @@
       </div>
     {/if}
 
-    {#if mode !== 'lgu' && latitude !== null && longitude !== null}
+    {#if mode === 'guest' && latitude !== null && longitude !== null}
       <div class="absolute top-2 left-1/2 -translate-x-1/2 z-[1000] bg-[#0C212F]/80 text-white/80 text-[10px] md:text-xs rounded-lg px-3 py-2 shadow-md backdrop-blur-sm font-mono">
         {latitude.toFixed(5)}, {longitude.toFixed(5)}
       </div>

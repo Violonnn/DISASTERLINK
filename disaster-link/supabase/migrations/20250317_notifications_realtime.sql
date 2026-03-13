@@ -1,0 +1,11 @@
+-- Enable Realtime for the notifications table so residents see new/updated/deleted
+-- notifications without refreshing (bell badge, list updates).
+--
+-- You MUST also add the table in Supabase Dashboard (or this migration will do it when pushed):
+--   1. Open https://supabase.com/dashboard → your project
+--   2. Database → Publications (or Replication)
+--   3. Click "supabase_realtime"
+--   4. Toggle ON the "notifications" table
+--
+-- If you run this SQL manually and get "already a member of publication", you're done.
+ALTER PUBLICATION supabase_realtime ADD TABLE public.notifications;

@@ -7,7 +7,7 @@
 
   const menuItems = [
     { label: 'Map', href: '/guest-dashboard' },
-    { label: 'Sign Up', href: '/signup' },
+    { label: 'Sign Up', href: '/signup/resident' },
     { label: 'Log In', href: '/login' }
   ];
 </script>
