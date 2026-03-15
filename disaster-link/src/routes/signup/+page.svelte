@@ -14,7 +14,7 @@
     </div>
 
     <div class="relative grid grid-cols-1 md:grid-cols-2 gap-6 mt-5">
-        <a href="signup/resident" class="card shadow-md bg-base-300 h-14 rounded-[8px] bg-[#2F4B5D]/70 grid place-content-center text-gray-500 text-sm pl-10 pr-20 whitespace-nowrap">Resident</a>
+        <a href="/signup/resident" class="card shadow-md bg-base-300 h-14 rounded-[8px] bg-[#2F4B5D]/70 grid place-content-center text-gray-500 text-sm pl-10 pr-20 whitespace-nowrap">Resident</a>
         <!-- <a href="signup/lgu-responder" class="card p-4 shadow-md bg-base-300 w-65 h-14 rounded-[8px]  bg-[#2F4B5D]/70 grid place-content-center text-gray-500 text-sm">LGU Official / Responder</a> -->
     </div>
 
