@@ -4,16 +4,22 @@
    * Shows hazard layers, search, GPS, and barangay status (realtime).
    */
   import MapDashboard from '$lib/components/MapDashboard.svelte';
-
-  const menuItems = [
-    { label: 'Map', href: '/guest-dashboard' },
-    { label: 'Sign Up', href: '/signup/resident' },
-    { label: 'Log In', href: '/login' }
+  import { goto } from '$app/navigation';
+  // Guest profile dropdown actions.
+  const pfpMenuItems = [
+    {
+      label: 'Register',
+      href: '/signup/resident'
+    },
+    {
+      label: 'Back',
+      action: () => goto('/')
+    }
   ];
 </script>
 
 <MapDashboard
   mode="guest"
   userLabel="Guest User"
-  {menuItems}
+  {pfpMenuItems}
 />

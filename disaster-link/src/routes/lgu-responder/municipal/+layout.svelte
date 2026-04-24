@@ -17,7 +17,8 @@
       return;
     }
     const { data } = await supabase.from('profiles').select('role').eq('id', session.user.id).single();
-    if (!data || data.role !== 'municipal_responder') {
+    const municipalRoles = ['municipal_responder', 'mdrrmo_admin', 'mdrrmo_staff', 'mayor'];
+    if (!data || !municipalRoles.includes(data.role)) {
       goto('/login');
       return;
     }

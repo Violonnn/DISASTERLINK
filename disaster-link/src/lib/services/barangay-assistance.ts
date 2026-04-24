@@ -148,7 +148,12 @@ export async function createAssistanceOffer(
     .eq('id', userId)
     .single();
 
-  const isMunicipal = profile?.role === 'municipal_responder' && !!profile?.municipality_id;
+  const isMunicipalRole =
+    profile?.role === 'municipal_responder' ||
+    profile?.role === 'mdrrmo_admin' ||
+    profile?.role === 'mdrrmo_staff' ||
+    profile?.role === 'mayor';
+  const isMunicipal = isMunicipalRole && !!profile?.municipality_id;
   const helpingBarangayId = profile?.barangay_id ?? null;
   const helpingMunicipalityId = profile?.municipality_id ?? null;
 

@@ -59,8 +59,7 @@
     uploadBrochurePhoto,
     validateBrochurePhoto
   } from '$lib/services/barangay-profile';
-import {
-    fetchReportTypes,
+  import {
     fetchAllHazardReports,
     fetchReportsByReporter,
     fetchHazardReportsForBarangays,
@@ -76,12 +75,19 @@ import {
     fetchReportNotes,
     toggleReportUpvote,
     createReportNote,
-    type ReportType,
     type HazardReport
   } from '$lib/services/hazard-report';
   import { saveResidentLocation, loadResidentLocation } from '$lib/services/resident-location-session';
   import { fetchWeatherForBarangay, type WeatherResult } from '$lib/services/weather';
   import { supabase } from '$lib/supabase';
+
+  // This keeps role checks readable while supporting both legacy and new LGU role labels.
+  const MUNICIPAL_ROLE_SET = new Set(['municipal_responder', 'mdrrmo_admin', 'mdrrmo_staff', 'mayor']);
+
+  function isMunicipalRole(role: string | null | undefined): boolean {
+    if (!role) return false;
+    return MUNICIPAL_ROLE_SET.has(role);
+  }
 
   interface MenuItem {
     label: string;
@@ -191,7 +197,8 @@ import {
   let legendOpen = $state(false);
   /* Resident left sidebar + which sub-panel is open ('legend' | 'hazard' | null) */
   let residentSidebarOpen = $state(false);
-  let activeSidebarPanel = $state<'legend' | 'hazard' | 'announcement' | 'local-reports' | 'contributions' | null>(null);
+  let activeSidebarPanel = $state<'legend' | 'hazard' | 'announcement' | 'local-reports' | 'contributions' | 'guest-login' | null>(null);
+  let guestRestrictedPanelTarget = $state<'notifications' | 'contributions'>('notifications');
   let isFullscreen = $state(false);
   let openMenu = $state<string | null>(null);
   let minglanillaBorderVisible = $state(false);
@@ -248,6 +255,7 @@ import {
   let notificationsOpen = $state(false);
   let notifications = $state<Notification[]>([]);
   let unreadCount = $state(0);
+  let guestNotificationOpen = $state(false);
 
   /* Resident notification state for toolbar panel */
   let residentNotificationsOpen = $state(false);
@@ -271,10 +279,8 @@ import {
 
   /* Hazard report state — LGU can report disasters with location, photos, videos */
   let reportPanelOpen = $state(false);
-  let reportTypes = $state<ReportType[]>([]);
   let reportTitle = $state('');
   let reportDescription = $state('');
-  let reportTypeId = $state('');
   let reportPhotoFiles = $state<File[]>([]);
   let reportVideoFiles = $state<File[]>([]);
   let reportMediaError = $state('');
@@ -283,6 +289,8 @@ import {
   let reportMarkersLayer = $state<L.LayerGroup | null>(null);
   let reportMarkerById = $state<Record<string, L.Marker>>({});
   let reportsChannel: ReturnType<typeof subscribeReportsRealtime> | null = null;
+  /** Debounce rapid postgres_changes on `reports` so one coalesced refresh updates the map and sidebars. */
+  let reportsRealtimeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let residentNotificationsChannel: ReturnType<typeof supabase.channel> | null = null;
   let selectedReport = $state<HazardReport | null>(null);
   let selectedReportComments = $state<Awaited<ReturnType<typeof fetchReportNotes>>>([]);
@@ -343,6 +351,20 @@ import {
     return list.sort((a, b) => engagement(b) - engagement(a) || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   });
 
+  const sortedGuestReports = $derived.by(() => {
+    const list = [...hazardReports];
+    if (localReportSort === 'date-desc') return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    if (localReportSort === 'date-asc') return list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const engagement = (r: HazardReport) => (r.upvoteCount ?? 0) + (r.commentCount ?? 0);
+    return list.sort((a, b) => engagement(b) - engagement(a) || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  });
+
+  const selectedReportOwnedBySignedInUser = $derived(
+    !!(selectedReport && signedInUserId && selectedReport.reporterId === signedInUserId)
+  );
+  const canCommentSelectedReport = $derived(mode === 'guest' ? selectedReportOwnedBySignedInUser : !!signedInUserId);
+  const canUpvoteSelectedReport = $derived(mode === 'guest' ? false : !!signedInUserId);
+
   /** Resolve which barangay to use for Local Reports: by user's current location (inside border) first, then profile. */
   async function loadLocalBarangayReports() {
     let barangayId: string | null = null;
@@ -376,8 +398,7 @@ import {
   const DEFAULT_CENTER: [number, number] = [10.3157, 123.8854];
   const DEFAULT_ZOOM = 13;
 
-  /* Toolbar items for resident mode — ordered Map · Report · Feed · Boundary · Hazard Layers.
-     Using $derived so active states (border visible, hazard count) update reactively. */
+  /* Toolbar items for resident and guest floating center bar. */
   const residentToolbarItems = $derived([
     {
       id: 'map',
@@ -421,15 +442,50 @@ import {
     }
   ]);
 
-  /* Split toolbar items into left (Map, Feed) and right (Boundary, Hazard) pools.
-     Report is always rendered separately in the center. */
+  const guestToolbarItems = $derived([
+    {
+      id: 'report',
+      label: 'Report',
+      href: undefined as string | undefined,
+      action: openReportPanel as (() => void) | undefined,
+      icon: '',
+      active: false
+    },
+    {
+      id: 'resources',
+      label: 'Resources',
+      href: undefined as string | undefined,
+      action: () => {
+        activeSidebarPanel = 'guest-login';
+        guestRestrictedPanelTarget = 'notifications';
+      },
+      icon: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:18px;height:18px"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>`,
+      active: false
+    },
+    {
+      id: 'hotlines',
+      label: 'Hotlines',
+      href: undefined as string | undefined,
+      action: () => {
+        activeSidebarPanel = 'guest-login';
+        guestRestrictedPanelTarget = 'notifications';
+      },
+      icon: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:18px;height:18px"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" /></svg>`,
+      active: false
+    }
+  ]);
+
+  /* Split toolbar items into left and right pools; Report is rendered in center. */
   const leftToolbarItems  = $derived(residentToolbarItems.filter(i => ['map',       'feed'].includes(i.id)));
   const rightToolbarItems = $derived(residentToolbarItems.filter(i => ['resources', 'hotlines'].includes(i.id)));
+  const guestLeftToolbarItems  = $derived(guestToolbarItems.filter(i => ['resources'].includes(i.id)));
+  const guestRightToolbarItems = $derived(guestToolbarItems.filter(i => ['hotlines'].includes(i.id)));
 
   function toggle(name: string) {
     // Ensure only one of profile menu / notifications / sidebar is open at a time
     notificationsOpen = false;
     residentNotificationsOpen = false;
+    guestNotificationOpen = false;
     residentSidebarOpen = false;
     openMenu = openMenu === name ? null : name;
   }
@@ -438,6 +494,7 @@ import {
     openMenu = null;
     notificationsOpen = false;
     residentNotificationsOpen = false;
+    guestNotificationOpen = false;
     residentSidebarOpen = false;
     barangayMgmtExpanded = false;
   }
@@ -571,8 +628,8 @@ import {
       html += `<span style="font-size:10px;font-weight:500;text-align:center;line-height:1.2">Provide Assistance</span></button>`;
     }
     html += `</div>`;
-    /* Resident: weather section inside the same popup container (loads when popup opens). */
-    if (mode === 'resident') {
+    /* Resident and guest: weather section inside the same popup container (loads when popup opens). */
+    if (mode === 'resident' || mode === 'guest') {
       html += `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #eee;font-size:11px;color:#444" data-weather-container>Loading weather…</div>`;
     }
     html += `</div>`;
@@ -606,8 +663,8 @@ import {
       barangayStatusLayer = null;
     }
 
-    /* Resident: when popup opens, fetch weather and show it inside the same popup container. */
-    const onPopupOpen = mode === 'resident' ? onBarangayPopupOpen : undefined;
+    /* Resident and guest: when popup opens, fetch weather and show it inside the same popup container. */
+    const onPopupOpen = mode === 'resident' || mode === 'guest' ? onBarangayPopupOpen : undefined;
     const layer = createBarangayStatusLayer(leaflet, data, buildBarangayPopupHtml, undefined, onPopupOpen);
     if (layer) {
       layer.addTo(map);
@@ -1434,12 +1491,9 @@ import {
       });
       marker = leaflet
         .marker([lat, lon], { icon: locationPinIcon })
-        .addTo(map)
-        .bindPopup('Locating address…')
-        .openPopup();
+        .addTo(map);
       const address = await reverseGeocode(lat, lon);
       locationText = address;
-      marker.setPopupContent(address);
       updateDetectedBarangay();
       if (mode === 'resident') {
         // Persist the successful location lookup for the rest of this tab session.
@@ -1485,9 +1539,7 @@ import {
     map.setView([stored.latitude, stored.longitude], 16);
     marker = leaflet
       .marker([stored.latitude, stored.longitude], { icon: locationPinIcon })
-      .addTo(map)
-      .bindPopup(stored.locationText)
-      .openPopup();
+      .addTo(map);
   }
 
   async function toggleHazardLayer(hazardType: HazardType) {
@@ -1521,8 +1573,8 @@ import {
 
   /* ── Hazard report: open panel, capture location first, then show form. Residents: barangay is detected from location (no affiliation required). ── */
   async function openReportPanel() {
-    const userId = mode === 'resident' ? residentUserId : lguUserId;
-    if (!userId) return;
+    const userId = mode === 'resident' ? residentUserId : mode === 'lgu' ? lguUserId : 'guest-reporter';
+    if (mode !== 'guest' && !userId) return;
 
     if (mode === 'lgu') {
       if (!lguBarangayInfo?.id) return;
@@ -1551,14 +1603,10 @@ import {
     reportPanelOpen = true;
     reportTitle = '';
     reportDescription = '';
-    reportTypeId = '';
     reportPhotoFiles = [];
     reportVideoFiles = [];
     reportMediaError = '';
     reportCreateProfile = null;
-
-    if (reportTypes.length === 0) reportTypes = await fetchReportTypes();
-    if (reportTypes.length > 0) reportTypeId = reportTypes[0].id;
 
     if (mode === 'lgu' && lguBarangayInfo?.id) {
       const profile = await fetchBarangayProfile(lguBarangayInfo.id);
@@ -1594,16 +1642,15 @@ import {
       if (marker && map) {
         marker.setLatLng([lat, lon]);
         marker.setIcon(locationPinIcon);
-        marker.setPopupContent('Current Location');
         if (!map.hasLayer(marker)) marker.addTo(map);
-        marker.openPopup();
       } else if (map && leaflet) {
-        marker = leaflet.marker([lat, lon], { icon: locationPinIcon }).addTo(map).bindPopup('Current Location').openPopup();
+        marker = leaflet.marker([lat, lon], { icon: locationPinIcon }).addTo(map);
       }
       map?.flyTo([lat, lon], 16, { duration: 1 });
       updateDetectedBarangay();
 
-      if (mode === 'resident') {
+      // Residents and guests both need barangay from the captured GPS point for reporting.
+      if (mode === 'resident' || mode === 'guest') {
         const at = getBarangayAtLocation(lat, lon);
         if (at) {
           reportBarangayId = at.id;
@@ -1633,7 +1680,6 @@ import {
     reportBarangayName = '';
     reportTitle = '';
     reportDescription = '';
-    reportTypeId = '';
     reportPhotoFiles = [];
     reportVideoFiles = [];
     reportPhotoPreviewUrls = [];
@@ -1689,24 +1735,32 @@ import {
   }
 
   async function submitReport() {
-    const barangayId = mode === 'resident' ? reportBarangayId : lguBarangayInfo?.id;
-    const userId     = mode === 'resident' ? residentUserId     : lguUserId;
-    if (mode === 'resident' && !reportBarangayId) {
+    const barangayId = mode === 'resident' || mode === 'guest' ? reportBarangayId : lguBarangayInfo?.id;
+    const reporterUserId = mode === 'resident' ? residentUserId : mode === 'lgu' ? lguUserId : '';
+
+    if ((mode === 'resident' || mode === 'guest') && !reportBarangayId) {
       locationError = 'Your location is not within a barangay boundary. Move inside a barangay area and try again.';
       return;
     }
-    if (!barangayId || !userId || latitude == null || longitude == null) return;
+    if (mode === 'resident' || mode === 'lgu') {
+      if (!reporterUserId?.trim()) {
+        locationError =
+          mode === 'resident' ? 'You must be signed in to submit a report.' : 'Session expired. Please sign in again.';
+        return;
+      }
+    }
+    if (!barangayId || latitude == null || longitude == null) return;
     const title = reportTitle.trim();
     if (title.length < 2) {
       locationError = 'Please enter a title (at least 2 characters).';
       return;
     }
     if (reportDescription.trim().length < 5) {
-      locationError = 'Please add a description (at least 5 characters).';
+      locationError = 'Please describe the situation (at least 5 characters).';
       return;
     }
-    if (!reportTypeId) {
-      locationError = 'Please select a hazard type.';
+    if (reportPhotoFiles.length + reportVideoFiles.length < 1) {
+      locationError = 'Please attach at least one photo or video before submitting.';
       return;
     }
     isSubmittingReport = true;
@@ -1723,23 +1777,53 @@ import {
         const url = await uploadReportVideo(f);
         if (url) videoUrls.push(url);
       }
-      const { id, error } = await createHazardReport({
-        barangayId: barangayId,
-        reporterId: userId,
-        reportTypeId,
-        title,
-        description: reportDescription.trim(),
-        gpsLat: latitude,
-        gpsLng: longitude,
-        photoUrls,
-        videoUrls
-      });
+      let result: { id: string | null; error: string | null };
+      if (mode === 'guest') {
+        const res = await fetch('/api/reports/guest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            barangayId: reportBarangayId,
+            title,
+            description: reportDescription.trim(),
+            gpsLat: latitude,
+            gpsLng: longitude,
+            photoUrls,
+            videoUrls
+          })
+        });
+        let body: { id?: string | null; error?: string | null } = {};
+        try {
+          body = (await res.json()) as typeof body;
+        } catch {
+          locationError = 'Could not reach the server. Check your connection and try again.';
+          return;
+        }
+        result = {
+          id: body.id ?? null,
+          error: body.error ?? (!res.ok ? 'Submit failed. Please try again.' : null)
+        };
+      } else {
+        result = await createHazardReport({
+          barangayId: barangayId,
+          reporterId: reporterUserId,
+          title,
+          description: reportDescription.trim(),
+          gpsLat: latitude,
+          gpsLng: longitude,
+          photoUrls,
+          videoUrls
+        });
+      }
+      const { id, error } = result;
       if (error) locationError = error;
       else if (id) {
         closeReportPanel();
         locationSuccess = 'Report submitted successfully.';
         await refreshReportMarkers();
-        await loadUserContributions();
+        if (mode === 'resident') {
+          await loadUserContributions();
+        }
       }
     } finally {
       isSubmittingReport = false;
@@ -1822,6 +1906,28 @@ import {
     reportMarkersLayer = group;
   }
 
+  /** Batch multiple Realtime events (e.g. several clients reporting) into one UI refresh. */
+  function scheduleRealtimeReportsRefresh() {
+    if (reportsRealtimeDebounceTimer) clearTimeout(reportsRealtimeDebounceTimer);
+    reportsRealtimeDebounceTimer = setTimeout(() => {
+      reportsRealtimeDebounceTimer = null;
+      void applyRealtimeReportsRefresh();
+    }, 200);
+  }
+
+  /** Reload markers from DB, keep the open detail panel in sync, and refresh resident lists that depend on reports. */
+  async function applyRealtimeReportsRefresh() {
+    await refreshReportMarkers();
+    const open = selectedReport;
+    if (open) {
+      const next = hazardReports.find((r) => r.id === open.id);
+      if (next) selectedReport = { ...next };
+      else closeReportDetail();
+    }
+    if (mode === 'resident') void loadLocalBarangayReports();
+    if (mode === 'resident' && residentUserId) void loadUserContributions();
+  }
+
   async function refreshSelectedReportState(reportId: string) {
     selectedReportComments = await fetchReportNotes(reportId);
     const topLevel = selectedReportComments.filter((n) => !n.parentNoteId);
@@ -1850,7 +1956,7 @@ import {
   }
 
   async function submitSelectedReportComment() {
-    if (!selectedReport || !signedInUserId) return;
+    if (!selectedReport || !canCommentSelectedReport || !signedInUserId) return;
     const draft = selectedReportCommentDraft.trim();
     if (draft.length < 2) {
       locationError = 'Comment must be at least 2 characters long.';
@@ -1876,7 +1982,7 @@ import {
   }
 
   async function toggleSelectedReportUpvote() {
-    if (!selectedReport) return;
+    if (!selectedReport || !canUpvoteSelectedReport) return;
     selectedReportTogglingUpvote = true;
     const { hasUpvoted, error } = await toggleReportUpvote(selectedReport.id);
     selectedReportTogglingUpvote = false;
@@ -2102,7 +2208,7 @@ import {
   }
 
   async function submitSelectedReportReply(parentNoteId: string) {
-    if (!selectedReport || !signedInUserId) return;
+    if (!selectedReport || !canCommentSelectedReport || !signedInUserId) return;
     const draft = (selectedReportReplyDrafts[parentNoteId] ?? '').trim();
     if (draft.length < 2) {
       locationError = 'Reply must be at least 2 characters long.';
@@ -2169,16 +2275,25 @@ import {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         maxZoom: 19
       }).addTo(map);
-      /* Only add Leaflet's built-in zoom control for non-resident modes.
-         Resident mode uses custom zoom buttons in the bottom-right UI. */
-      if (mode !== 'resident') {
+      /* LGU keeps Leaflet zoom controls; resident and guest use custom controls. */
+      if (mode === 'lgu') {
         L.control.zoom({ position: 'topleft' }).addTo(map);
       }
 
       try {
         await refreshBarangayStatusLayer();
         realtimeChannel = subscribeBarangayStatusRealtime(() => refreshBarangayStatusLayer());
-        reportsChannel = subscribeReportsRealtime(() => refreshReportMarkers());
+      } catch {
+        /* Barangay layer may fail if tables not set up; map still works */
+      }
+
+      try {
+        reportsChannel = subscribeReportsRealtime(() => scheduleRealtimeReportsRefresh());
+      } catch {
+        /* Realtime requires `reports` in publication supabase_realtime (see migration 20260426). */
+      }
+
+      try {
         if (mode === 'lgu' && lguUserId) {
           unreadCount = await countUnreadNotifications(lguUserId);
         }
@@ -2215,7 +2330,7 @@ import {
           }
         }
       } catch {
-        /* Barangay layer may fail if tables not set up; map still works */
+        /* Notifications or resident bootstrap may fail without blocking the map */
       }
     })();
 
@@ -2224,6 +2339,7 @@ import {
 
   onDestroy(() => {
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+    if (reportsRealtimeDebounceTimer) clearTimeout(reportsRealtimeDebounceTimer);
     realtimeChannel?.unsubscribe?.();
     assistanceChannel?.unsubscribe?.();
     reportsChannel?.unsubscribe?.();
@@ -2308,14 +2424,14 @@ import {
   <header class="h-12 md:h-14 shrink-0 bg-[#0C212F]/95 shadow-md z-50 border-b border-white/10">
     <div class="h-full mx-auto flex items-center justify-between gap-2 px-3 md:px-4 max-w-screen-xl relative">
       <div class="flex items-center gap-2 md:gap-3 relative z-20 shrink-0">
-        {#if openMenu || notificationsOpen || residentNotificationsOpen}
+        {#if openMenu || notificationsOpen || residentNotificationsOpen || guestNotificationOpen}
           <button class="fixed inset-0 z-10 cursor-default" onclick={close} aria-label="Close menu"></button>
         {/if}
         <div class="flex items-center gap-2 bg-[#768391]/10 rounded-full px-2 md:px-3 py-1 relative z-20">
           <div class="relative">
             <button
               class="bg-white/20 text-white rounded-full w-7 h-7 md:w-8 md:h-8 flex items-center justify-center text-[10px] md:text-xs font-bold hover:bg-white/30 transition cursor-pointer touch-manipulation"
-              onclick={() => { if (mode === 'resident') { residentSidebarOpen = false; activeSidebarPanel = null; } toggle('pfp'); }}
+              onclick={() => { if (mode !== 'lgu') { residentSidebarOpen = false; activeSidebarPanel = null; } toggle('pfp'); }}
             >
               {userInitials || userLabel.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase() || '?'}
             </button>
@@ -2323,7 +2439,7 @@ import {
               <div class="absolute left-0 mt-3 w-48 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30">
                 <p class="px-3 py-2 text-[10px] text-gray-400 border-b border-gray-100">{userLabel}</p>
                 <div class="p-2">
-                  {#each ((mode === 'lgu' || mode === 'resident') && pfpMenuItems ? pfpMenuItems : menuItems) as item}
+                  {#each (pfpMenuItems && pfpMenuItems.length > 0 ? pfpMenuItems : menuItems) as item}
                     {#if item.href}
                       <a href={item.href} class="block px-3 py-2 hover:bg-gray-50 rounded-lg text-xs text-[#1B2E3A]">{item.label}</a>
                     {:else if item.action}
@@ -2449,17 +2565,51 @@ import {
               {/if}
             </div>
           {/if}
+          {#if mode === 'guest'}
+            <div class="relative">
+              <button
+                class="cursor-pointer p-1 touch-manipulation relative"
+                onclick={() => {
+                  openMenu = null;
+                  notificationsOpen = false;
+                  residentNotificationsOpen = false;
+                  residentSidebarOpen = false;
+                  guestNotificationOpen = !guestNotificationOpen;
+                }}
+                aria-label="Notifications"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="white" class="w-5 h-5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75v-.7V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" />
+                </svg>
+              </button>
+              {#if guestNotificationOpen}
+                <div class="absolute left-0 mt-3 w-72 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30">
+                  <div class="px-3 py-2.5 border-b border-gray-100">
+                    <p class="text-[#1B2E3A] text-xs font-semibold">Notifications</p>
+                  </div>
+                  <div class="px-3 py-3">
+                    <p class="text-[#1B2E3A] text-xs leading-relaxed">
+                      You need to
+                      <a href="/login" class="font-bold text-[#1B2E3A] hover:text-amber-600 underline transition">Login</a>
+                      to view notifications.
+                    </p>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
           <div class="relative">
             <button
               class="cursor-pointer p-1 touch-manipulation"
               onclick={() => {
-                if (mode === 'resident') {
+                if (mode !== 'lgu') {
                   // Toggle sidebar; close profile + both notification panels
                   residentSidebarOpen = !residentSidebarOpen;
                   if (!residentSidebarOpen) activeSidebarPanel = null;
                   openMenu = null;
                   notificationsOpen = false;
                   residentNotificationsOpen = false;
+                  guestNotificationOpen = false;
                 } else {
                   toggle('menu');
                 }
@@ -2470,7 +2620,7 @@ import {
                 <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
               </svg>
             </button>
-            {#if openMenu === 'menu' && mode !== 'resident'}
+            {#if openMenu === 'menu' && mode === 'lgu'}
               <div class="absolute left-0 mt-3 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-30 min-w-[200px] md:min-w-[220px]">
                 <div class="p-2">
                   <div class="grid grid-cols-3 gap-1">
@@ -2495,7 +2645,7 @@ import {
                       {/if}
                     {/each}
                   </div>
-                  {#if mode === 'lgu' && (!pendingRequest || lguRole === 'municipal_responder')}
+                  {#if mode === 'lgu' && (!pendingRequest || isMunicipalRole(lguRole))}
                     <div class="mt-1 pt-1 border-t border-gray-100">
                       <button
                         class="flex items-center justify-between w-full px-3 py-2 hover:bg-gray-50 rounded-lg text-xs text-[#1B2E3A]"
@@ -2513,7 +2663,7 @@ import {
                       </button>
                       {#if barangayMgmtExpanded}
                         <div class="ml-3 mt-1 space-y-0.5 border-l-2 border-gray-200 pl-2">
-                          {#if lguRole === 'municipal_responder'}
+                          {#if isMunicipalRole(lguRole)}
                             <button onclick={() => { openMunicipalApprovalPanel(); close(); }} class="block w-full text-left px-2 py-1.5 hover:bg-gray-50 rounded text-[11px] text-indigo-700">
                               Approve Boundary Requests
                             </button>
@@ -2536,7 +2686,7 @@ import {
                                 Leave Barangay
                               </button>
                             {/if}
-                          {:else if lguRole !== 'municipal_responder'}
+                          {:else if !isMunicipalRole(lguRole)}
                             <button onclick={() => { openMapAreaPanel(); close(); }} disabled={isDrawingBoundary || isSavingBoundary} class="block w-full text-left px-2 py-1.5 hover:bg-gray-50 rounded text-[11px] text-emerald-700 disabled:opacity-50">
                               Map My Barangay
                             </button>
@@ -2558,7 +2708,7 @@ import {
         <h1 class="text-sm text-gray-400 tracking-wider select-none" style="font-family: 'Playfair Display SC', serif">
           DISASTERLINK
         </h1>
-        {#if mode === 'lgu' || mode === 'resident'}
+        {#if mode === 'lgu' || mode === 'resident' || mode === 'guest'}
           <p class="text-white text-[10px] sm:text-xs text-center whitespace-nowrap overflow-hidden max-w-[90vw] md:max-w-md text-ellipsis">
             <span class="text-white/70">Current Location:</span>
             <span class="text-white/95">{#if isLocating}Locating…{:else}{locationText}{/if}</span>
@@ -2566,18 +2716,16 @@ import {
             {#if mode === 'resident'}
               <span class="text-white/70">Barangay:</span>
               <span class="text-white/95">{detectedBarangayName}</span>
+            {:else if mode === 'guest'}
+              <span class="text-white/70">Guest View</span>
             {:else}
-              <span class="text-white/70">{lguRole === 'municipal_responder' ? 'Affiliated Municipality:' : 'Affiliated Barangay:'}</span>
-              <span class="text-white/95">{lguRole === 'municipal_responder' ? (lguMunicipalityName || '—') : (lguBarangayInfo?.name ?? '—')}</span>
+              <span class="text-white/70">{isMunicipalRole(lguRole) ? 'Affiliated Municipality:' : 'Affiliated Barangay:'}</span>
+              <span class="text-white/95">{isMunicipalRole(lguRole) ? (lguMunicipalityName || '—') : (lguBarangayInfo?.name ?? '—')}</span>
             {/if}
           </p>
         {/if}
       </div>
-      {#if mode === 'guest'}
-        <p class="text-white/70 text-[10px] md:text-xs truncate max-w-[100px] sm:max-w-[140px] md:max-w-xs text-right shrink-0 ml-auto">
-          {#if isLocating}Locating…{:else}{locationLabel || locationText}{/if}
-        </p>
-      {:else if mode === 'resident'}
+      {#if mode === 'resident' || mode === 'guest'}
         <!-- Search bar lives inside the header for resident mode (right-aligned) -->
         <div class="relative shrink-0 w-36 sm:w-44 md:w-56 ml-auto">
           <input
@@ -2630,7 +2778,7 @@ import {
        when their respective pools overflow beyond 2 visible slots.
        Outer wrapper is transparent to create a visual gap below the header;
        the inner pill auto-sizes to its content and floats as a rounded card. -->
-  {#if mode === 'resident'}
+  {#if mode !== 'lgu'}
     <!-- Toolbar wrapper: re-centers itself in the visible map area as the sidebar
          and sub-panel open / close. Sidebar rail ≈ 95px, sub-panel ≈ 340px. -->
     <div
@@ -2652,14 +2800,14 @@ import {
       <!-- Left group: arrow + Map + Feed, right-aligned so they hug the Report button -->
       <div class="flex items-center justify-end gap-0.5">
         <button
-          class="p-1.5 text-white/30 hover:text-white/70 transition-all touch-manipulation shrink-0 {leftToolbarItems.length <= 2 ? 'opacity-0 pointer-events-none' : ''}"
+          class="p-1.5 text-white/30 hover:text-white/70 transition-all touch-manipulation shrink-0 {(mode === 'guest' ? guestLeftToolbarItems.length : leftToolbarItems.length) <= 2 ? 'opacity-0 pointer-events-none' : ''}"
           aria-label="Previous left options"
         >
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4">
             <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
           </svg>
         </button>
-        {#each leftToolbarItems as item (item.id)}
+        {#each (mode === 'guest' ? guestLeftToolbarItems : leftToolbarItems) as item (item.id)}
           {#if item.href}
             <a
               href={item.href}
@@ -2699,7 +2847,7 @@ import {
 
       <!-- Right group: Resources + Hotlines + arrow, left-aligned so they hug Report -->
       <div class="flex items-center justify-start gap-0.5">
-        {#each rightToolbarItems as item (item.id)}
+        {#each (mode === 'guest' ? guestRightToolbarItems : rightToolbarItems) as item (item.id)}
           {#if item.href}
             <a
               href={item.href}
@@ -2723,7 +2871,7 @@ import {
           {/if}
         {/each}
         <button
-          class="p-1.5 text-white/30 hover:text-white/70 transition-all touch-manipulation shrink-0 {rightToolbarItems.length <= 2 ? 'opacity-0 pointer-events-none' : ''}"
+          class="p-1.5 text-white/30 hover:text-white/70 transition-all touch-manipulation shrink-0 {(mode === 'guest' ? guestRightToolbarItems.length : rightToolbarItems.length) <= 2 ? 'opacity-0 pointer-events-none' : ''}"
           aria-label="More right options"
         >
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4">
@@ -2764,7 +2912,7 @@ import {
        Options stack vertically (icon on top, label below). Sub-panels (Map Legend,
        Hazard Layers) open to the right and are scrollable, including a placeholder
        for future announcements from Mayor / MDRRMO / BDRRMO. -->
-  {#if mode === 'resident' && residentSidebarOpen}
+  {#if mode !== 'lgu' && residentSidebarOpen}
     <!-- top-12 md:top-14 keeps the sidebar flush below the header without covering it -->
     <div class="absolute left-0 top-12 md:top-14 bottom-0 z-[1002] flex pointer-events-auto">
 
@@ -2791,7 +2939,9 @@ import {
               activeSidebarPanel = null;
             } else {
               activeSidebarPanel = 'local-reports';
-              await loadLocalBarangayReports();
+              if (mode === 'resident') {
+                await loadLocalBarangayReports();
+              }
             }
           }}
           class="flex flex-col items-center gap-1.5 px-5 py-4 transition-all touch-manipulation cursor-pointer border-r-2 {activeSidebarPanel === 'local-reports' ? 'bg-white/15 border-white/60' : 'border-transparent hover:bg-white/10'}"
@@ -2806,6 +2956,11 @@ import {
         <!-- Your Contributions -->
         <button
           onclick={async () => {
+            if (mode === 'guest') {
+              activeSidebarPanel = 'guest-login';
+              guestRestrictedPanelTarget = 'contributions';
+              return;
+            }
             if (activeSidebarPanel === 'contributions') {
               activeSidebarPanel = null;
             } else {
@@ -2929,16 +3084,18 @@ import {
               </div>
             </div>
 
-            <!-- Go to Feed button -->
-            <a
-              href="/resident/feed"
-              class="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-white/10 border border-white/20 text-white/80 text-xs font-semibold hover:bg-white/15 transition"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-              </svg>
-              View all in Feed
-            </a>
+            <!-- Go to Feed (residents only; guests stay on the map) -->
+            {#if mode !== 'guest'}
+              <a
+                href="/resident/feed"
+                class="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-white/10 border border-white/20 text-white/80 text-xs font-semibold hover:bg-white/15 transition"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
+                </svg>
+                View all in Feed
+              </a>
+            {/if}
           </div>
         </div>
       {/if}
@@ -2947,11 +3104,17 @@ import {
       {#if activeSidebarPanel === 'local-reports'}
         <div class="w-[340px] md:w-[420px] bg-[#081c29] border-r border-white/10 shadow-2xl flex flex-col overflow-hidden">
           <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0 bg-[#0C212F]">
-            <span class="text-white text-sm font-semibold">Local Resident Reports</span>
+            <span class="text-white text-sm font-semibold">{mode === 'guest' ? 'Resident Reports' : 'Local Resident Reports'}</span>
             <button onclick={() => (activeSidebarPanel = null)} class="text-white/50 hover:text-white transition cursor-pointer text-base leading-none" aria-label="Close">&#x2715;</button>
           </div>
           <div class="flex-1 overflow-y-auto sidebar-scroll p-4 space-y-4">
-            <p class="text-white/50 text-[10px]">Reports in {localReportsBarangayName || 'your barangay'}</p>
+            <p class="text-white/50 text-[10px]">
+              {#if mode === 'guest'}
+                Showing all resident-submitted reports.
+              {:else}
+                Reports in {localReportsBarangayName || 'your barangay'}
+              {/if}
+            </p>
             <div class="flex items-center gap-2">
               <label for="local-report-sort" class="text-white/50 text-[10px] shrink-0 cursor-pointer">Sort by</label>
               <select
@@ -2964,14 +3127,14 @@ import {
                 <option value="engagement" class="text-gray-900 bg-white">Most engagement</option>
               </select>
             </div>
-            {#if localBarangayReportsLoading}
+            {#if mode === 'resident' && localBarangayReportsLoading}
               <div class="flex justify-center py-6">
                 <svg class="animate-spin h-7 w-7 text-white/50" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                   <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                   <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
                 </svg>
               </div>
-            {:else if sortedLocalBarangayReports.length === 0}
+            {:else if (mode === 'guest' ? sortedGuestReports.length : sortedLocalBarangayReports.length) === 0}
               <div class="flex flex-col items-center justify-center gap-3 py-8 text-center">
                 <div class="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center">
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-white/30">
@@ -2979,9 +3142,11 @@ import {
                   </svg>
                 </div>
                 <div>
-                  <p class="text-white/50 text-xs font-medium">No reports in your barangay yet</p>
+                  <p class="text-white/50 text-xs font-medium">{mode === 'guest' ? 'No resident reports yet' : 'No reports in your barangay yet'}</p>
                   <p class="text-white/25 text-[11px] mt-1">
-                    {#if !latitude || !longitude}
+                    {#if mode === 'guest'}
+                      Reports will appear here as soon as residents submit them.
+                    {:else if !latitude || !longitude}
                       Tap "Get My Location" on the map so we can show reports in your current area.
                     {:else if !localReportsBarangayName}
                       Reports in your current area will appear here once submitted.
@@ -2993,7 +3158,7 @@ import {
               </div>
             {:else}
               <div class="space-y-3">
-                {#each sortedLocalBarangayReports as r (r.id)}
+                {#each (mode === 'guest' ? sortedGuestReports : sortedLocalBarangayReports) as r (r.id)}
                   <div class="bg-white/5 border border-white/10 rounded-xl p-3.5 flex gap-3">
                     <div class="flex-1 min-w-0">
                       <p class="text-white/50 text-[10px] mb-0.5">{formatContributionDate(r.createdAt)}</p>
@@ -3045,6 +3210,28 @@ import {
                 {/each}
               </div>
             {/if}
+          </div>
+        </div>
+      {/if}
+
+      {#if activeSidebarPanel === 'guest-login'}
+        <div class="w-[340px] md:w-[420px] bg-[#081c29] border-r border-white/10 shadow-2xl flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0 bg-[#0C212F]">
+            <span class="text-white text-sm font-semibold">{guestRestrictedPanelTarget === 'notifications' ? 'Notifications' : 'Your Contributions'}</span>
+            <button onclick={() => (activeSidebarPanel = null)} class="text-white/50 hover:text-white transition cursor-pointer text-base leading-none" aria-label="Close">&#x2715;</button>
+          </div>
+          <div class="flex-1 overflow-y-auto sidebar-scroll p-4">
+            <div class="rounded-xl border border-white/10 bg-white/5 p-4">
+              <p class="text-white/80 text-sm">
+                You need to
+                <a href="/login" class="font-bold text-white hover:text-amber-300 underline transition">Login</a>
+                to access this section.
+              </p>
+              <p class="mt-2 text-white/55 text-xs">
+                No account yet?
+                <a href="/signup/resident" class="font-semibold text-cyan-300 hover:text-cyan-200 underline transition">Register here</a>.
+              </p>
+            </div>
           </div>
         </div>
       {/if}
@@ -3156,7 +3343,7 @@ import {
       {#if contributionEditReport}
         <div class="fixed inset-0 z-[1200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" role="dialog" aria-modal="true">
           <button class="absolute inset-0 cursor-pointer" onclick={closeContributionEdit} aria-label="Close"></button>
-          <div class="relative z-10 w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#0C212F] rounded-xl border border-white/10 shadow-2xl p-4" onclick={(e) => e.stopPropagation()}>
+          <div class="relative z-10 w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#0C212F] rounded-xl border border-white/10 shadow-2xl p-4" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} tabindex="-1" role="presentation">
             <h3 class="text-white font-semibold text-sm mb-3">Edit report</h3>
             {#if contributionError}<p class="text-amber-400 text-xs mb-2">{contributionError}</p>{/if}
             <label for="contribution-edit-title" class="block text-white/60 text-[10px] mb-1">Title</label>
@@ -3207,7 +3394,7 @@ import {
       {#if contributionDeleteReport}
         <div class="fixed inset-0 z-[1200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" role="dialog" aria-modal="true">
           <button class="absolute inset-0 cursor-pointer" onclick={closeContributionDelete} aria-label="Close"></button>
-          <div class="relative z-10 w-full max-w-sm bg-[#0C212F] rounded-xl border border-white/10 shadow-2xl p-4" onclick={(e) => e.stopPropagation()}>
+          <div class="relative z-10 w-full max-w-sm bg-[#0C212F] rounded-xl border border-white/10 shadow-2xl p-4" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} tabindex="-1" role="presentation">
             <h3 class="text-white font-semibold text-sm mb-2">Delete report?</h3>
             <p class="text-white/70 text-xs mb-4">This cannot be undone. The report "{contributionDeleteReport.title ?? 'Untitled'}" will be permanently removed.</p>
             {#if contributionDeleteError}<p class="text-amber-400 text-xs mb-3">{contributionDeleteError}</p>{/if}
@@ -3333,7 +3520,7 @@ import {
   <div class="flex-1 relative min-h-0 map-dashboard-wrapper" onclick={handleMapContainerClick} role="presentation">
     <div bind:this={mapElement} class="absolute inset-0 z-0"></div>
 
-    {#if mode !== 'resident'}
+    {#if mode === 'lgu'}
     <div class="absolute top-3 left-3 right-3 md:left-auto md:right-4 md:w-72 z-[1000]">
       <div class="relative">
         <input
@@ -3386,7 +3573,7 @@ import {
     <div class="absolute bottom-4 left-4 right-4 md:left-auto md:right-4 md:bottom-4 md:right-4 flex flex-col-reverse gap-2 z-[1000] pointer-events-none">
       <!-- items-end aligns Get My Location to the bottom of the zoom+fullscreen column in resident mode -->
       <div class="flex flex-wrap gap-2 pointer-events-auto justify-end md:justify-start items-end">
-        {#if mode !== 'resident'}
+        {#if mode === 'lgu'}
         <button
           onclick={toggleMinglanillaBorder}
           class="flex items-center gap-2 px-4 py-3 md:px-4 md:py-2.5 bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white text-sm font-medium rounded-xl shadow-lg backdrop-blur-sm transition-all cursor-pointer touch-manipulation min-h-[44px] md:min-h-0 {minglanillaBorderVisible ? 'ring-2 ring-blue-400' : ''}"
@@ -3460,7 +3647,7 @@ import {
               {/if}
             </button>
           </div>
-        {:else}
+        {:else if mode === 'lgu'}
           <!-- Non-resident: standalone fullscreen button as before -->
           <button
             onclick={toggleFullscreen}
@@ -3479,7 +3666,7 @@ import {
           </button>
         {/if}
 
-        {#if mode !== 'resident'}
+        {#if mode === 'lgu'}
         <button
           onclick={() => (hazardPanelOpen = !hazardPanelOpen)}
           class="p-3 md:p-2.5 rounded-xl bg-[#0C212F]/90 hover:bg-[#1B2E3A] text-white shadow-lg backdrop-blur-sm transition-all touch-manipulation flex items-center gap-1.5 min-h-[44px] md:min-h-0"
@@ -3748,26 +3935,28 @@ import {
       </div>
     {/if}
 
-    {#if reportPanelOpen && (lguBarangayInfo || mode === 'resident')}
+    {#if reportPanelOpen && (lguBarangayInfo || mode === 'resident' || mode === 'guest')}
       <div
-        class="fixed inset-0 z-[1100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="fixed inset-0 z-[1100] flex items-center justify-center p-4 pointer-events-none"
         role="dialog"
         aria-modal="true"
         aria-labelledby="report-create-title"
         tabindex="-1"
         onkeydown={(e) => e.key === 'Escape' && closeReportPanel()}
       >
+        <!-- Full-screen scrim: pointer-events-auto so only the dimmed area closes; card stays clickable above. -->
         <button
-          class="absolute inset-0 cursor-pointer"
+          type="button"
+          class="absolute inset-0 z-0 cursor-pointer border-0 bg-black/60 backdrop-blur-sm pointer-events-auto"
           onclick={closeReportPanel}
           aria-label="Close dialog"
         ></button>
         <div
-          class="relative z-10 w-full max-w-md max-h-[90vh] flex flex-col bg-[#0C212F] rounded-xl shadow-2xl border border-white/10 overflow-hidden"
-          onclick={(e) => e.stopPropagation()}
+          class="relative z-10 w-full max-w-md max-h-[90vh] flex flex-col bg-[#0C212F] rounded-xl shadow-2xl border border-white/10 overflow-hidden pointer-events-auto"
           role="document"
         >
           <button
+            type="button"
             onclick={closeReportPanel}
             class="absolute top-3 right-3 z-10 w-8 h-8 flex items-center justify-center rounded-full bg-black/40 hover:bg-black/60 text-white transition cursor-pointer"
             aria-label="Close"
@@ -3785,7 +3974,7 @@ import {
             <div class="relative p-4 pt-10">
               <h2 id="report-create-title" class="text-white font-semibold text-base">Report Hazard / Disaster</h2>
               <p class="text-white/70 text-xs mt-0.5">
-                {#if mode === 'resident'}
+                {#if mode === 'resident' || mode === 'guest'}
                   {reportBarangayId
                     ? reportBarangayName + ', Minglanilla'
                     : 'Not within a barangay boundary'}
@@ -3825,6 +4014,7 @@ import {
             </div>
             <div>
               <label for="report-desc" class="block text-white/60 text-[10px] mb-1">Description</label>
+              <p class="mb-1 text-[10px] text-white/55">Please describe the situation (at least 5 characters).</p>
               <div class="rounded-lg border border-white/20 bg-white/5 overflow-hidden">
                 <textarea
                   id="report-desc"
@@ -3889,21 +4079,43 @@ import {
                   {/if}
                 </div>
               </div>
+              {#if reportDescription.trim().length > 0 && reportDescription.trim().length < 5}
+                <p class="text-amber-400 text-[10px] mt-1">Please describe the situation (at least 5 characters).</p>
+              {/if}
               {#if reportMediaError}
                 <p class="text-amber-400 text-[10px] mt-1">{reportMediaError}</p>
               {/if}
             </div>
+            <div class="rounded-lg border border-white/15 bg-white/5 px-3 py-2">
+              <p class="text-[10px] text-white/65">Required attachment: add at least one photo or video.</p>
+              <p class="text-[10px] mt-1 {reportPhotoFiles.length + reportVideoFiles.length > 0 ? 'text-emerald-300' : 'text-amber-400'}">
+                {reportPhotoFiles.length + reportVideoFiles.length > 0
+                  ? `Attached ${reportPhotoFiles.length + reportVideoFiles.length} file(s).`
+                  : 'No attachments yet.'}
+              </p>
+            </div>
             <div class="flex gap-2 pt-2">
               <button
+                type="button"
                 onclick={closeReportPanel}
                 class="flex-1 py-2.5 bg-white/10 hover:bg-white/20 text-white text-xs font-medium rounded-lg transition cursor-pointer"
               >
                 Cancel
               </button>
               <button
-                onclick={submitReport}
-                disabled={isSubmittingReport || latitude == null || longitude == null || reportTitle.trim().length < 2 || reportDescription.trim().length < 5 || (mode === 'resident' && !reportBarangayId)}
-                class="flex-1 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white text-xs font-medium rounded-lg transition cursor-pointer"
+                type="button"
+                onclick={() => void submitReport()}
+                disabled={isSubmittingReport || latitude == null || longitude == null || reportTitle.trim().length < 2 || reportDescription.trim().length < 5 || (reportPhotoFiles.length + reportVideoFiles.length) < 1 || ((mode === 'resident' || mode === 'guest') && !reportBarangayId)}
+                title={isSubmittingReport || latitude == null || longitude == null
+                  ? 'Waiting for location…'
+                  : reportTitle.trim().length < 2 || reportDescription.trim().length < 5
+                    ? 'Enter a title (2+ chars) and describe the situation (5+ chars).'
+                    : (reportPhotoFiles.length + reportVideoFiles.length) < 1
+                      ? 'Attach at least one photo or video.'
+                    : (mode === 'resident' || mode === 'guest') && !reportBarangayId
+                      ? 'Move inside a barangay boundary on the map, then open Report again.'
+                      : 'Submit this report'}
+                class="flex-1 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-600 disabled:opacity-70 text-white text-xs font-medium rounded-lg transition enabled:cursor-pointer disabled:cursor-not-allowed"
               >
                 {isSubmittingReport ? 'Submitting…' : 'Submit Report'}
               </button>
@@ -4275,7 +4487,6 @@ import {
         ></button>
         <div
           class="relative z-10 w-full max-w-xl max-h-[90vh] flex flex-col bg-[#1B2E3A] rounded-2xl shadow-2xl border border-white/10 overflow-hidden"
-          onclick={(e) => e.stopPropagation()}
           role="document"
         >
           <button
@@ -4364,7 +4575,7 @@ import {
                           {/each}
                         </div>
                       {/if}
-                      {#if signedInUserId}
+                      {#if canCommentSelectedReport}
                         <button
                           type="button"
                           class="mt-1 text-[10px] font-medium text-white/50 hover:text-white/80 transition touch-manipulation cursor-pointer"
@@ -4398,7 +4609,7 @@ import {
                       </div>
                     </div>
                   {/each}
-                  {#if selectedReportReplyTarget === note.id && signedInUserId}
+                  {#if selectedReportReplyTarget === note.id && canCommentSelectedReport}
                     <div class="mt-1 ml-8 pl-3 flex items-start gap-2">
                       <div class="w-7 h-7 rounded-full bg-white/15 flex items-center justify-center text-white text-[9px] font-semibold shrink-0">
                         {userInitials || 'R'}
@@ -4506,7 +4717,7 @@ import {
 
           <!-- Bottom action bar: comment input + comment count + photo + upvote (same as feed; always allow when signed in) -->
           <div class="p-4 pt-3 border-t border-white/10 flex items-center gap-2">
-            {#if signedInUserId}
+            {#if canCommentSelectedReport}
               <div class={selectedReportActiveCommentFocus ? 'basis-4/5' : 'basis-2/3'}>
                 <input
                   type="text"
@@ -4586,21 +4797,27 @@ import {
                     <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12.75l2.9-2.9a1.5 1.5 0 012.12 0l2.9 2.9M13.5 11.25l1.15-1.15a1.5 1.5 0 012.12 0l1.73 1.73" />
                   </svg>
                 </label>
-                <button
-                  class="flex items-center gap-0.5 p-1.5 rounded-full hover:bg-white/10 transition touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer {selectedReportHasUpvoted ? 'text-amber-300' : 'text-white/60 hover:text-orange-400'}"
-                  aria-label="Upvotes"
-                  title="Upvotes"
-                  disabled={selectedReportTogglingUpvote}
-                  onclick={() => toggleSelectedReportUpvote()}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18" />
-                  </svg>
-                  <span class="text-[10px]">{selectedReport.upvoteCount ?? 0}</span>
-                </button>
+                {#if canUpvoteSelectedReport}
+                  <button
+                    class="flex items-center gap-0.5 p-1.5 rounded-full hover:bg-white/10 transition touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer {selectedReportHasUpvoted ? 'text-amber-300' : 'text-white/60 hover:text-orange-400'}"
+                    aria-label="Upvotes"
+                    title="Upvotes"
+                    disabled={selectedReportTogglingUpvote}
+                    onclick={() => toggleSelectedReportUpvote()}
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18" />
+                    </svg>
+                    <span class="text-[10px]">{selectedReport.upvoteCount ?? 0}</span>
+                  </button>
+                {/if}
               </div>
             {:else}
-              <p class="text-white/50 text-[11px]">Sign in to upvote or comment.</p>
+              <p class="text-white/50 text-[11px]">
+                {mode === 'guest'
+                  ? 'Log in to comment and upvote.'
+                  : 'Sign in to upvote or comment.'}
+              </p>
             {/if}
           </div>
         </div>
@@ -4608,13 +4825,13 @@ import {
     {/if}
 
     {#if locationError}
-      <div class="absolute top-16 left-1/2 -translate-x-1/2 z-[1001] bg-red-600/90 text-white text-xs rounded-lg px-4 py-2.5 shadow-lg max-w-[90vw] md:max-w-xs text-center backdrop-blur-sm flex items-center gap-2">
+      <div class="absolute top-16 left-1/2 -translate-x-1/2 z-[1200] bg-red-600/90 text-white text-xs rounded-lg px-4 py-2.5 shadow-lg max-w-[90vw] md:max-w-xs text-center backdrop-blur-sm flex items-center gap-2">
         <span class="flex-1">{locationError}</span>
         <button onclick={() => (locationError = '')} class="font-bold hover:text-red-200 cursor-pointer shrink-0 touch-manipulation">✕</button>
       </div>
     {/if}
     {#if locationSuccess}
-      <div class="absolute top-16 left-1/2 -translate-x-1/2 z-[1001] bg-emerald-600/90 text-white text-xs rounded-lg px-4 py-2.5 shadow-lg max-w-[90vw] md:max-w-xs text-center backdrop-blur-sm flex items-center gap-2">
+      <div class="absolute top-16 left-1/2 -translate-x-1/2 z-[1200] bg-emerald-600/90 text-white text-xs rounded-lg px-4 py-2.5 shadow-lg max-w-[90vw] md:max-w-xs text-center backdrop-blur-sm flex items-center gap-2">
         <span class="flex-1">{locationSuccess}</span>
         <button onclick={() => (locationSuccess = '')} class="font-bold hover:text-emerald-200 cursor-pointer shrink-0 touch-manipulation">✕</button>
       </div>

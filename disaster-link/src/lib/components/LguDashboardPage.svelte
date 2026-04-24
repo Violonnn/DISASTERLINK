@@ -58,7 +58,8 @@
       .eq('id', session.user.id)
       .single();
 
-    if (profile?.role === 'municipal_responder' && profile.municipality_id) {
+    const municipalRoles = ['municipal_responder', 'mdrrmo_admin', 'mdrrmo_staff', 'mayor'];
+    if (profile?.role && municipalRoles.includes(profile.role) && profile.municipality_id) {
       lguMunicipalityId = profile.municipality_id;
       const { data: mun } = await supabase
         .from('municipalities')
@@ -68,7 +69,15 @@
       lguMunicipalityName = mun?.name ?? '';
     }
 
-    const lguRoles = ['lgu_responder', 'municipal_responder', 'barangay_responder'];
+    const lguRoles = [
+      'lgu_responder',
+      'municipal_responder',
+      'barangay_responder',
+      'bdrrmo',
+      'mdrrmo_admin',
+      'mdrrmo_staff',
+      'mayor'
+    ];
     if (!profile || !lguRoles.includes(profile.role)) {
       goto('/login');
       return;

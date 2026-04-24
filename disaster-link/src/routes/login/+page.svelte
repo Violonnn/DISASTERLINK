@@ -3,7 +3,6 @@
     import { page } from '$app/stores';
     import { supabase } from '$lib/supabase';
     import { goto } from '$app/navigation';
-    import { getLguDashboardPath } from '$lib/auth-redirect';
 
     /* ── Form field state ── */
     let email = $state('');
@@ -56,6 +55,17 @@
         Object.values(errors).every((msg) => msg === '')
     );
 
+    async function isResidentScopedEmail(emailValue: string): Promise<boolean> {
+        const response = await fetch('/api/auth/login-scope', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: emailValue.trim() })
+        });
+        if (!response.ok) return false;
+        const payload = (await response.json().catch(() => ({}))) as { isResidentEmail?: boolean };
+        return payload.isResidentEmail === true;
+    }
+
     /* ── Login handler ── */
     async function handleLogin(event: SubmitEvent) {
         event.preventDefault();
@@ -92,6 +102,13 @@
             isSubmitting = false;
 
             if (authError.message.toLowerCase().includes('email not confirmed')) {
+                // This avoids exposing resident-specific confirmation feedback to LGU emails on resident login.
+                const isResidentEmail = await isResidentScopedEmail(email.trim());
+                if (!isResidentEmail) {
+                    errorMessage = 'No account found.';
+                    return;
+                }
+
                 infoMessage = 'Your email is not yet verified. Please check your inbox for the confirmation link.';
                 return;
             }
@@ -113,16 +130,16 @@
             return;
         }
 
-        /* Step 4: Redirect based on role — all LGU roles use getLguDashboardPath */
+        /* Step 4: Restrict this page to resident accounts only. */
         isSubmitting = false;
 
         const role = profile.role as string;
         if (role === 'resident') {
             goto('/resident/dashboard');
-        } else if (role === 'lgu_responder' || role === 'municipal_responder' || role === 'barangay_responder') {
-            goto(getLguDashboardPath(role));
         } else {
-            goto('/');
+            await supabase.auth.signOut();
+            errorMessage = 'No account found.';
+            return;
         }
     }
 </script>
@@ -222,7 +239,7 @@
                     <button
                         type="submit"
                         disabled={isSubmitting}
-                        class="relative right-10 w-40 bg-gray-800 text-white py-2 rounded-[14px] mt-4 hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center self-center"
+                        class="w-40 bg-gray-800 text-white py-2 rounded-[14px] mt-4 hover:bg-gray-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center self-center"
                     >
                         {#if isSubmitting}
                             <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
