@@ -56,6 +56,7 @@
   let replyVisibleCounts = $state<Record<string, number>>({});
 
   let feedChannel: ReturnType<typeof supabase.channel> | null = null;
+  let feedRealtimeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   const currentPath = '/resident/feed';
   const feedQuickLinks = [
@@ -153,6 +154,15 @@
     } else {
       commentPhotoUrls = { ...commentPhotoUrls, [postId]: next };
     }
+  }
+
+  /** Coalesce rapid Realtime bursts (reports + notes + upvotes) into one feed reload. */
+  function scheduleFeedRefresh() {
+    if (feedRealtimeDebounceTimer) clearTimeout(feedRealtimeDebounceTimer);
+    feedRealtimeDebounceTimer = setTimeout(() => {
+      feedRealtimeDebounceTimer = null;
+      void refreshFeed();
+    }, 250);
   }
 
   /* Refresh the entire feed and comments for realtime updates. */
@@ -466,27 +476,21 @@
 
     /* Realtime updates for reports, comments, and upvotes */
     feedChannel = supabase
-      .channel('resident-feed-sync')
+      .channel(`resident-feed-sync-${crypto.randomUUID()}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'reports' },
-        () => {
-          void refreshFeed();
-        }
+        () => scheduleFeedRefresh()
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'report_notes' },
-        () => {
-          void refreshFeed();
-        }
+        () => scheduleFeedRefresh()
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'report_upvotes' },
-        () => {
-          void refreshFeed();
-        }
+        () => scheduleFeedRefresh()
       )
       .subscribe();
 
@@ -494,6 +498,7 @@
   });
 
   onDestroy(() => {
+    if (feedRealtimeDebounceTimer) clearTimeout(feedRealtimeDebounceTimer);
     feedChannel?.unsubscribe();
     feedNotificationsChannel?.unsubscribe();
   });

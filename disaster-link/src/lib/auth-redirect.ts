@@ -4,8 +4,12 @@
 
 export const LGU_DASHBOARD_PATHS: Record<string, string> = {
   municipal_responder: '/lgu-responder/municipal/dashboard',
+  mdrrmo_admin: '/lgu-responder/municipal/dashboard',
+  mdrrmo_staff: '/lgu-responder/municipal/dashboard',
+  mayor: '/lgu-responder/municipal/dashboard',
   barangay_responder: '/lgu-responder/barangay/dashboard',
-  lgu_responder: '/lgu-responder/barangay/dashboard'
+  lgu_responder: '/lgu-responder/barangay/dashboard',
+  bdrrmo: '/lgu-responder/barangay/dashboard'
 };
 
 /**

@@ -78,27 +78,20 @@ CREATE INDEX idx_profiles_barangay ON public.profiles(barangay_id);
 CREATE INDEX idx_profiles_municipality ON public.profiles(municipality_id);
 
 -- =============================================================================
--- REPORTS (citizen disaster/incident reports)
+-- REPORTS (citizen disaster/incident reports — category is free-form in title/description)
 -- =============================================================================
-
-CREATE TABLE public.report_types (
-  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name       TEXT NOT NULL,
-  slug       TEXT UNIQUE NOT NULL,
-  sort_order INT NOT NULL DEFAULT 0
-);
 
 CREATE TABLE public.reports (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   reporter_id      UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   barangay_id      UUID NOT NULL REFERENCES public.barangays(id) ON DELETE CASCADE,
-  report_type_id  UUID NOT NULL REFERENCES public.report_types(id) ON DELETE RESTRICT,
   status           public.report_status NOT NULL DEFAULT 'pending',
   title            TEXT,
   description      TEXT,
   gps_lat          DOUBLE PRECISION,
   gps_lng          DOUBLE PRECISION,
   photo_urls       JSONB DEFAULT '[]'::jsonb,
+  video_urls       JSONB DEFAULT '[]'::jsonb,
   acknowledged_at  TIMESTAMPTZ,
   acknowledged_by  UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
   resolved_at     TIMESTAMPTZ,
@@ -225,21 +218,12 @@ RETURNS UUID AS $$
 $$ LANGUAGE sql STABLE SECURITY DEFINER;
 
 -- =============================================================================
--- SEED: Minglanilla + report/marker/resource types (optional, run once)
+-- SEED: Minglanilla (optional, run once)
 -- =============================================================================
 
 INSERT INTO public.municipalities (id, name, code, region) VALUES
   ('a0000000-0000-0000-0000-000000000001'::uuid, 'Minglanilla', 'MING', 'Central Visayas')
 ON CONFLICT (id) DO NOTHING;
-
-INSERT INTO public.report_types (name, slug, sort_order) VALUES
-  ('Flooding', 'flooding', 1),
-  ('Landslide', 'landslide', 2),
-  ('Fire', 'fire', 3),
-  ('Medical Emergency', 'medical_emergency', 4),
-  ('Infrastructure Damage', 'infrastructure_damage', 5),
-  ('Others', 'others', 6)
-ON CONFLICT (slug) DO NOTHING;
 
 -- =============================================================================
 -- ROW LEVEL SECURITY (RLS)
@@ -248,7 +232,6 @@ ON CONFLICT (slug) DO NOTHING;
 ALTER TABLE public.municipalities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.barangays ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.report_types ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.report_notes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.barangay_status_updates ENABLE ROW LEVEL SECURITY;
@@ -277,12 +260,6 @@ CREATE POLICY "profiles_select_same_barangay_lgu" ON public.profiles FOR SELECT 
 CREATE POLICY "profiles_select_admin" ON public.profiles FOR SELECT USING (
   public.current_user_role() IN ('admin', 'super_admin')
 );
-
--- ----------
--- report_types: read all
--- ----------
-CREATE POLICY "report_types_select_all" ON public.report_types FOR SELECT USING (true);
-CREATE POLICY "report_types_modify_admin" ON public.report_types FOR ALL USING (public.current_user_role() IN ('admin', 'super_admin'));
 
 -- ----------
 -- reports: resident = own + barangay; LGU = barangay; admin = all. Insert = resident. Update = LGU/admin (ack/resolve)

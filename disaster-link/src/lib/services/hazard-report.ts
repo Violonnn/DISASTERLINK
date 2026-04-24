@@ -13,12 +13,20 @@ const PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const VIDEO_TYPES = ['video/mp4', 'video/webm'];
 const PHOTO_MAX_SIZE = 5 * 1024 * 1024; // 5 MB
 const VIDEO_MAX_SIZE = 50 * 1024 * 1024; // 50 MB
-
-export interface ReportType {
-  id: string;
-  name: string;
-  slug: string;
-}
+const BASE_REPORT_SELECT = `
+  id,
+  reporter_id,
+  barangay_id,
+  status,
+  title,
+  description,
+  gps_lat,
+  gps_lng,
+  photo_urls,
+  video_urls,
+  created_at,
+  updated_at
+`;
 
 export interface HazardReport {
   id: string;
@@ -29,8 +37,6 @@ export interface HazardReport {
   barangayName: string;
   municipalityName: string;
   profileImageUrl: string | null;
-  reportTypeId: string;
-  reportTypeName: string;
   status: string;
   title: string | null;
   description: string | null;
@@ -57,18 +63,6 @@ export interface ReportNote {
   createdAt: string;
 }
 
-/**
- * Fetch all report types (flooding, landslide, fire, etc.) for the type selector.
- */
-export async function fetchReportTypes(): Promise<ReportType[]> {
-  const { data, error } = await supabase
-    .from('report_types')
-    .select('id, name, slug')
-    .order('sort_order', { ascending: true });
-  if (error) return [];
-  return (data ?? []).map((r) => ({ id: r.id, name: r.name, slug: r.slug }));
-}
-
 function formatPublisherName(p: { first_name?: string; last_name?: string } | null): string {
   if (!p) return 'Unknown';
   const fn = (p.first_name ?? '').trim();
@@ -81,17 +75,6 @@ function firstBrochureUrl(urls: unknown): string | null {
   if (!Array.isArray(urls) || urls.length === 0) return null;
   const first = urls[0];
   return typeof first === 'string' && first.trim().length > 0 ? first : null;
-}
-
-function reportTypeName(reportTypes: unknown): string {
-  const v = reportTypes as unknown;
-  if (Array.isArray(v) && v.length > 0 && v[0] && typeof v[0] === 'object' && v[0] !== null && 'name' in v[0]) {
-    return String((v[0] as { name: unknown }).name) || 'Unknown';
-  }
-  if (v && typeof v === 'object' && 'name' in v) {
-    return String((v as { name: unknown }).name) || 'Unknown';
-  }
-  return 'Unknown';
 }
 
 /**
@@ -107,7 +90,6 @@ export async function fetchHazardReportsForBarangay(
       id,
       reporter_id,
       barangay_id,
-      report_type_id,
       status,
       title,
       description,
@@ -117,7 +99,6 @@ export async function fetchHazardReportsForBarangay(
       video_urls,
       created_at,
       updated_at,
-      report_types ( name ),
       report_notes ( count ),
       report_upvotes ( count ),
       profiles!reporter_id ( first_name, last_name, avatar_url ),
@@ -129,7 +110,17 @@ export async function fetchHazardReportsForBarangay(
     .not('gps_lng', 'is', null)
     .order('created_at', { ascending: false });
 
-  if (error) return [];
+  if (error) {
+    const fallback = await supabase
+      .from('reports')
+      .select(BASE_REPORT_SELECT)
+      .eq('barangay_id', barangayId)
+      .not('gps_lat', 'is', null)
+      .not('gps_lng', 'is', null)
+      .order('created_at', { ascending: false });
+    if (fallback.error) return [];
+    return (fallback.data ?? []).map((row) => mapBasicReportRow(row as Record<string, unknown>));
+  }
 
   return (data ?? []).map((row) => {
     const rawBarangay = row.barangays as unknown;
@@ -149,8 +140,6 @@ export async function fetchHazardReportsForBarangay(
       barangayName: barangay?.name ?? 'Unknown',
       municipalityName: (municipality && typeof municipality === 'object' && 'name' in municipality ? municipality.name : null) ?? '',
       profileImageUrl: firstBrochureUrl(barangay?.brochure_photo_urls) ?? null,
-      reportTypeId: row.report_type_id,
-      reportTypeName: reportTypeName(row.report_types),
       status: row.status,
       title: row.title ?? null,
       description: row.description ?? null,
@@ -181,7 +170,6 @@ export async function fetchAllHazardReports(): Promise<HazardReport[]> {
       id,
       reporter_id,
       barangay_id,
-      report_type_id,
       status,
       title,
       description,
@@ -191,7 +179,6 @@ export async function fetchAllHazardReports(): Promise<HazardReport[]> {
       video_urls,
       created_at,
       updated_at,
-      report_types ( name ),
       profiles!reporter_id ( first_name, last_name, avatar_url ),
       barangays ( name, brochure_photo_urls, municipalities ( name ) ),
       report_notes ( count ),
@@ -202,7 +189,16 @@ export async function fetchAllHazardReports(): Promise<HazardReport[]> {
     .not('gps_lng', 'is', null)
     .order('created_at', { ascending: false });
 
-  if (error) return [];
+  if (error) {
+    const fallback = await supabase
+      .from('reports')
+      .select(BASE_REPORT_SELECT)
+      .not('gps_lat', 'is', null)
+      .not('gps_lng', 'is', null)
+      .order('created_at', { ascending: false });
+    if (fallback.error) return [];
+    return (fallback.data ?? []).map((row) => mapBasicReportRow(row as Record<string, unknown>));
+  }
 
   return (data ?? []).map((row) => {
     const rawBarangay = row.barangays as unknown;
@@ -222,8 +218,6 @@ export async function fetchAllHazardReports(): Promise<HazardReport[]> {
       barangayName: barangay?.name ?? 'Unknown',
       municipalityName: (municipality && typeof municipality === 'object' && 'name' in municipality ? municipality.name : null) ?? '',
       profileImageUrl: firstBrochureUrl(barangay?.brochure_photo_urls) ?? null,
-      reportTypeId: row.report_type_id,
-      reportTypeName: reportTypeName(row.report_types),
       status: row.status,
       title: row.title ?? null,
       description: row.description ?? null,
@@ -256,7 +250,6 @@ export async function fetchReportsByBarangayId(barangayId: string): Promise<Haza
       id,
       reporter_id,
       barangay_id,
-      report_type_id,
       status,
       title,
       description,
@@ -266,7 +259,6 @@ export async function fetchReportsByBarangayId(barangayId: string): Promise<Haza
       video_urls,
       created_at,
       updated_at,
-      report_types ( name ),
       profiles!reporter_id ( first_name, last_name, avatar_url ),
       barangays ( name, brochure_photo_urls, municipalities ( name ) ),
       report_notes ( count ),
@@ -276,7 +268,15 @@ export async function fetchReportsByBarangayId(barangayId: string): Promise<Haza
     .eq('barangay_id', barangayId)
     .order('created_at', { ascending: false });
 
-  if (error) return [];
+  if (error) {
+    const fallback = await supabase
+      .from('reports')
+      .select(BASE_REPORT_SELECT)
+      .eq('barangay_id', barangayId)
+      .order('created_at', { ascending: false });
+    if (fallback.error) return [];
+    return (fallback.data ?? []).map((row) => mapBasicReportRow(row as Record<string, unknown>));
+  }
 
   return (data ?? []).map((row) => mapReportRowToHazardReport(row));
 }
@@ -299,8 +299,6 @@ function mapReportRowToHazardReport(row: Record<string, unknown>): HazardReport 
     barangayName: barangay?.name ?? 'Unknown',
     municipalityName: (municipality && typeof municipality === 'object' && 'name' in municipality ? municipality.name : null) ?? '',
     profileImageUrl: firstBrochureUrl(barangay?.brochure_photo_urls) ?? null,
-    reportTypeId: row.report_type_id as string,
-    reportTypeName: reportTypeName(row.report_types),
     status: row.status as string,
     title: (row.title as string) ?? null,
     description: (row.description as string) ?? null,
@@ -319,6 +317,34 @@ function mapReportRowToHazardReport(row: Record<string, unknown>): HazardReport 
   };
 }
 
+function mapBasicReportRow(row: Record<string, unknown>): HazardReport {
+  return {
+    id: row.id as string,
+    reporterId: (row.reporter_id as string) ?? '',
+    publisherName: 'Unknown',
+    publisherAvatarUrl: null,
+    barangayId: (row.barangay_id as string) ?? '',
+    barangayName: 'Unknown',
+    municipalityName: '',
+    profileImageUrl: null,
+    status: (row.status as string) ?? 'pending',
+    title: (row.title as string) ?? null,
+    description: (row.description as string) ?? null,
+    gpsLat: (row.gps_lat as number | null) ?? null,
+    gpsLng: (row.gps_lng as number | null) ?? null,
+    photoUrls: Array.isArray(row.photo_urls)
+      ? (row.photo_urls as string[]).filter((u): u is string => typeof u === 'string' && u.length > 0)
+      : [],
+    videoUrls: Array.isArray(row.video_urls)
+      ? (row.video_urls as string[]).filter((u): u is string => typeof u === 'string' && u.length > 0)
+      : [],
+    createdAt: (row.created_at as string) ?? new Date().toISOString(),
+    updatedAt: row.updated_at as string | undefined,
+    commentCount: 0,
+    upvoteCount: 0
+  };
+}
+
 /**
  * Fetch hazard reports for multiple barangays (e.g. for municipal view).
  * Only includes reports with GPS (for map markers).
@@ -334,7 +360,6 @@ export async function fetchHazardReportsForBarangays(
       id,
       reporter_id,
       barangay_id,
-      report_type_id,
       status,
       title,
       description,
@@ -344,7 +369,6 @@ export async function fetchHazardReportsForBarangays(
       video_urls,
       created_at,
       updated_at,
-      report_types ( name ),
       profiles!reporter_id ( first_name, last_name, avatar_url ),
       barangays ( name, brochure_photo_urls, municipalities ( name ) ),
       report_notes ( count ),
@@ -356,7 +380,17 @@ export async function fetchHazardReportsForBarangays(
     .not('gps_lng', 'is', null)
     .order('created_at', { ascending: false });
 
-  if (error) return [];
+  if (error) {
+    const fallback = await supabase
+      .from('reports')
+      .select(BASE_REPORT_SELECT)
+      .in('barangay_id', barangayIds)
+      .not('gps_lat', 'is', null)
+      .not('gps_lng', 'is', null)
+      .order('created_at', { ascending: false });
+    if (fallback.error) return [];
+    return (fallback.data ?? []).map((row) => mapBasicReportRow(row as Record<string, unknown>));
+  }
 
   return (data ?? []).map((row) => mapReportRowToHazardReport(row as Record<string, unknown>));
 }
@@ -373,7 +407,6 @@ export async function fetchFeedPosts(limit = 20): Promise<HazardReport[]> {
       id,
       reporter_id,
       barangay_id,
-      report_type_id,
       status,
       title,
       description,
@@ -383,7 +416,6 @@ export async function fetchFeedPosts(limit = 20): Promise<HazardReport[]> {
       video_urls,
       created_at,
       updated_at,
-      report_types ( name ),
       profiles!reporter_id ( first_name, last_name, avatar_url ),
       barangays ( name, brochure_photo_urls, municipalities ( name ) ),
       report_notes ( count ),
@@ -393,7 +425,15 @@ export async function fetchFeedPosts(limit = 20): Promise<HazardReport[]> {
     .order('created_at', { ascending: false })
     .limit(limit);
 
-  if (error) return [];
+  if (error) {
+    const fallback = await supabase
+      .from('reports')
+      .select(BASE_REPORT_SELECT)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (fallback.error) return [];
+    return (fallback.data ?? []).map((row) => mapBasicReportRow(row as Record<string, unknown>));
+  }
 
   return (data ?? []).map((row) => {
     const rawBarangay = row.barangays as unknown;
@@ -413,8 +453,6 @@ export async function fetchFeedPosts(limit = 20): Promise<HazardReport[]> {
       barangayName: barangay?.name ?? 'Unknown',
       municipalityName: (municipality && typeof municipality === 'object' && 'name' in municipality ? municipality.name : null) ?? '',
       profileImageUrl: firstBrochureUrl(barangay?.brochure_photo_urls) ?? null,
-      reportTypeId: row.report_type_id,
-      reportTypeName: reportTypeName(row.report_types),
       status: row.status,
       title: row.title ?? null,
       description: row.description ?? null,
@@ -445,7 +483,6 @@ export async function fetchReportsByReporter(reporterId: string): Promise<Hazard
       id,
       reporter_id,
       barangay_id,
-      report_type_id,
       status,
       title,
       description,
@@ -455,7 +492,6 @@ export async function fetchReportsByReporter(reporterId: string): Promise<Hazard
       video_urls,
       created_at,
       updated_at,
-      report_types ( name ),
       profiles!reporter_id ( first_name, last_name, avatar_url ),
       barangays ( name, brochure_photo_urls, municipalities ( name ) ),
       report_notes ( count ),
@@ -465,7 +501,15 @@ export async function fetchReportsByReporter(reporterId: string): Promise<Hazard
     .eq('reporter_id', reporterId)
     .order('created_at', { ascending: false });
 
-  if (error) return [];
+  if (error) {
+    const fallback = await supabase
+      .from('reports')
+      .select(BASE_REPORT_SELECT)
+      .eq('reporter_id', reporterId)
+      .order('created_at', { ascending: false });
+    if (fallback.error) return [];
+    return (fallback.data ?? []).map((row) => mapBasicReportRow(row as Record<string, unknown>));
+  }
 
   return (data ?? []).map((row) => {
     const rawBarangay = row.barangays as unknown;
@@ -485,8 +529,6 @@ export async function fetchReportsByReporter(reporterId: string): Promise<Hazard
       barangayName: barangay?.name ?? 'Unknown',
       municipalityName: (municipality && typeof municipality === 'object' && 'name' in municipality ? municipality.name : null) ?? '',
       profileImageUrl: firstBrochureUrl(barangay?.brochure_photo_urls) ?? null,
-      reportTypeId: row.report_type_id,
-      reportTypeName: reportTypeName(row.report_types),
       status: row.status,
       title: row.title ?? null,
       description: row.description ?? null,
@@ -674,7 +716,6 @@ export async function deleteHazardReport(reportId: string, reporterId: string): 
 export async function createHazardReport(params: {
   barangayId: string;
   reporterId: string;
-  reportTypeId: string;
   title: string;
   description: string;
   gpsLat: number;
@@ -682,12 +723,17 @@ export async function createHazardReport(params: {
   photoUrls: string[];
   videoUrls: string[];
 }): Promise<{ id: string | null; error: string | null }> {
+  if ((params.description?.trim() ?? '').length < 5) {
+    return { id: null, error: 'Please describe the situation (at least 5 characters).' };
+  }
+  if ((params.photoUrls?.length ?? 0) + (params.videoUrls?.length ?? 0) < 1) {
+    return { id: null, error: 'Please attach at least one photo or video before submitting.' };
+  }
   const { data, error } = await supabase
     .from('reports')
     .insert({
       reporter_id: params.reporterId,
       barangay_id: params.barangayId,
-      report_type_id: params.reportTypeId,
       title: params.title.trim(),
       description: params.description.trim() || null,
       gps_lat: params.gpsLat,
@@ -757,9 +803,15 @@ export function validateReportVideo(file: File): string | null {
 /**
  * Subscribe to realtime changes on reports table (for live marker updates).
  */
+/**
+ * Subscribe to live changes on `public.reports`. Requires the table in publication `supabase_realtime`
+ * and a SELECT policy that allows the current role to see relevant rows (e.g. `reports_select_public`).
+ * Uses a unique channel id per subscription so multiple map instances or tabs do not clash.
+ */
 export function subscribeReportsRealtime(onUpdate: () => void): RealtimeChannel {
+  const channelId = `hazard-reports-${crypto.randomUUID()}`;
   const channel = supabase
-    .channel('hazard-reports-sync')
+    .channel(channelId)
     .on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'reports' },

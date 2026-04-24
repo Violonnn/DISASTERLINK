@@ -1,11 +1,12 @@
 <script lang="ts">
   /**
-   * Barangay responder signup — municipality + barangay dropdowns, proof upload, role barangay_responder.
+   * BDRMMO signup — invite-only flow with municipality + barangay selection.
    */
   import { onMount } from 'svelte';
   import { supabase } from '$lib/supabase';
   import { goto } from '$app/navigation';
   import { fetchMunicipalities, fetchBarangaysByMunicipality } from '$lib/services/barangay-boundary';
+  let { data } = $props();
 
   /* ── Form field state ── */
   let firstName = $state('');
@@ -16,8 +17,6 @@
   let confirmPassword = $state('');
   let municipalityId = $state('');
   let barangayId = $state('');
-  let proofFile: File | null = $state(null);
-  let proofPreview = $state('');
 
   /* ── Data ── */
   let municipalities = $state<{ id: string; name: string }[]>([]);
@@ -28,10 +27,6 @@
   let errorMessage = $state('');
   let successMessage = $state('');
   let showErrors = $state(false);
-
-  /* ── File constraints ── */
-  const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-  const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
   /* ── Reactive validation ── */
   let errors = $derived({
@@ -62,28 +57,10 @@
           ? 'Passwords do not match'
           : '',
     municipality: municipalityId === '' ? 'Select your municipality' : '',
-    barangay: barangayId === '' ? 'Select your barangay' : '',
-    proof: (() => {
-      if (!proofFile) return 'Proof of employment is required';
-      const file = proofFile as File;
-      if (!ALLOWED_TYPES.includes(file.type)) return 'Only JPG, PNG, or WebP images are allowed';
-      if (file.size > MAX_FILE_SIZE) return 'File must be under 5 MB';
-      return '';
-    })()
+    barangay: barangayId === '' ? 'Select your barangay' : ''
   });
 
   let isFormValid = $derived(Object.values(errors).every((msg) => msg === ''));
-
-  function handleFileSelect(event: Event) {
-    const input = event.target as HTMLInputElement;
-    const file = input.files?.[0] ?? null;
-    proofFile = file;
-    if (file && ALLOWED_TYPES.includes(file.type)) {
-      const reader = new FileReader();
-      reader.onload = (e) => (proofPreview = (e.target?.result as string) ?? '');
-      reader.readAsDataURL(file);
-    } else proofPreview = '';
-  }
 
   async function onMunicipalityChange(munId: string) {
     municipalityId = munId;
@@ -98,7 +75,7 @@
   async function handleSignup(event: SubmitEvent) {
     event.preventDefault();
     showErrors = true;
-    if (!isFormValid || !proofFile) return;
+    if (!isFormValid) return;
 
     isSubmitting = true;
     errorMessage = '';
@@ -115,20 +92,7 @@
       return;
     }
 
-    const fileExt = proofFile.name.split('.').pop()?.toLowerCase() ?? 'jpg';
-    const fileName = `${crypto.randomUUID()}.${fileExt}`;
-    const { error: uploadError } = await supabase.storage
-      .from('proof-of-employment')
-      .upload(fileName, proofFile, { contentType: proofFile.type });
-    if (uploadError) {
-      isSubmitting = false;
-      errorMessage = 'Failed to upload proof of employment. Please try again.';
-      return;
-    }
-
-    const { data: urlData } = supabase.storage.from('proof-of-employment').getPublicUrl(fileName);
-
-    const { data, error } = await supabase.auth.signUp({
+    const { data: signUpData, error } = await supabase.auth.signUp({
       email: email.trim(),
       password,
       options: {
@@ -136,10 +100,9 @@
           first_name: firstName.trim(),
           last_name: lastName.trim(),
           contact_phone: phone.trim(),
-          role: 'barangay_responder',
+          role: 'bdrrmo',
           municipality_id: municipalityId,
-          barangay_id: barangayId,
-          proof_of_employment_url: urlData.publicUrl
+          barangay_id: barangayId
         },
         emailRedirectTo: `${window.location.origin}/login`
       }
@@ -150,17 +113,46 @@
       errorMessage = error.message;
       return;
     }
-    if (data.user?.identities?.length === 0) {
+    if (signUpData.user?.identities?.length === 0) {
       errorMessage = 'This email is already registered. Please log in instead.';
       return;
     }
-    successMessage =
-      'Account created! Your proof of employment will be reviewed by an admin before you can log in.';
+
+    // This marks the invitation as used so the same link cannot be reused.
+    const consumeResponse = await fetch('/api/invitations/consume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: data.inviteToken,
+        userId: signUpData.user?.id ?? '',
+        expectedRole: 'bdrrmo'
+      })
+    });
+    if (!consumeResponse.ok) {
+      const consumePayload = (await consumeResponse.json().catch(() => ({}))) as { error?: string };
+      errorMessage =
+        consumePayload.error ??
+        'Account was created, but the invitation could not be finalized. Please contact MDRMMO Admin.';
+      return;
+    }
+
+    successMessage = 'BDRMMO account created successfully. You can proceed to login after email confirmation.';
     setTimeout(() => goto('/login'), 4000);
   }
 
   onMount(async () => {
+    // This prevents already authenticated users from using invitation registration pages.
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (sessionData.session) {
+      goto('/');
+      return;
+    }
+
     municipalities = await fetchMunicipalities();
+    if (data.invitedMunicipalityId) {
+      municipalityId = data.invitedMunicipalityId;
+      barangayOptions = await fetchBarangaysByMunicipality(data.invitedMunicipalityId);
+    }
   });
 </script>
 
@@ -180,8 +172,13 @@
     class="relative bg-[#2F4B5D]/4 w-full max-w-[680px] px-6 py-10 grid place-content-center rounded-[16px] shadow-lg"
   >
     <div class="relative w-full flex flex-col items-center">
-      <h1 class="relative text-[#2F4B5D] text-2xl font-bold text-center">Barangay Responder</h1>
-      <span class="relative text-[#2F4B5D] font-light text-sm mt-1">Barangay-level access</span>
+      <h1 class="relative text-[#2F4B5D] text-2xl font-bold text-center">BDRMMO Registration</h1>
+      <span class="relative text-[#2F4B5D] font-light text-sm mt-1">Role: {data.invitedRoleLabel}</span>
+      {#if data.invitedMunicipalityName}
+        <p class="mt-2 text-[11px] text-emerald-700">
+          Invitation linked to the <span class="font-semibold text-emerald-800">Municipality of {data.invitedMunicipalityName}</span>
+        </p>
+      {/if}
 
       {#if successMessage}
         <div class="w-full md:w-140 mt-4 bg-green-100 border border-green-400 text-green-800 text-xs rounded-lg px-4 py-3 text-center">
@@ -226,7 +223,8 @@
             name="municipality"
             bind:value={municipalityId}
             onchange={(e) => onMunicipalityChange((e.target as HTMLSelectElement).value)}
-            class="w-91 border p-1 rounded-lg text-xs text-[#0C212F]"
+            disabled={!!data.invitedMunicipalityId}
+            class="w-91 border p-1 rounded-lg text-xs text-[#0C212F] disabled:bg-gray-100 disabled:text-gray-500"
           >
             <option value="">— Select municipality —</option>
             {#each municipalities as m}<option value={m.id}>{m.name}</option>{/each}
@@ -259,20 +257,6 @@
           {#if showErrors && errors.confirmPassword}<p class="absolute bottom-0 left-1 text-[9px] text-red-500">{errors.confirmPassword}</p>{/if}
         </div>
 
-        <div class="relative pb-3 md:col-span-2 w-full text-left ml-1">
-          <label for="PROOF" class="text-[10px] text-[#2F4B5D]">Proof of Employment <span class="text-red-500">*</span></label>
-          <p class="text-[9px] text-[#2F4B5D]/60 ml-1 mb-1">JPG, PNG, WebP — max 5 MB</p>
-          <label for="PROOF" class="flex items-center gap-2 w-91 border border-dashed border-[#2F4B5D]/40 rounded-lg p-2 cursor-pointer hover:border-[#2F4B5D] transition-colors">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="#2F4B5D" class="w-5 h-5 shrink-0">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-            </svg>
-            <span class="text-xs text-[#0C212F] truncate">{proofFile ? proofFile.name : 'Choose file…'}</span>
-          </label>
-          <input id="PROOF" type="file" accept="image/jpeg,image/png,image/webp" onchange={handleFileSelect} class="hidden" />
-          {#if proofPreview}<img src={proofPreview} alt="Proof" class="mt-2 w-24 h-24 object-cover rounded-lg border" />{/if}
-          {#if showErrors && errors.proof}<p class="absolute bottom-0 left-1 text-[9px] text-red-500">{errors.proof}</p>{/if}
-        </div>
-
         <button
           type="submit"
           disabled={isSubmitting}
@@ -289,6 +273,5 @@
         </button>
       </div>
     </div>
-    <a href="/signup/lgu-responder" class="relative mt-4 block text-center text-[#2F4B5D] text-xs hover:underline">← Back to LGU options</a>
   </form>
 </div>

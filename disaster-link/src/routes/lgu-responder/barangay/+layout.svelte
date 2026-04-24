@@ -17,7 +17,7 @@
       return;
     }
     const { data } = await supabase.from('profiles').select('role').eq('id', session.user.id).single();
-    const barangayRoles = ['barangay_responder', 'lgu_responder'];
+    const barangayRoles = ['barangay_responder', 'lgu_responder', 'bdrrmo'];
     if (!data || !barangayRoles.includes(data.role)) {
       goto('/login');
       return;

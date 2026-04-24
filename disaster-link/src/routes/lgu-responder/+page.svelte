@@ -21,7 +21,15 @@
       .eq('id', session.user.id)
       .single();
 
-    const lguRoles = ['lgu_responder', 'municipal_responder', 'barangay_responder'];
+    const lguRoles = [
+      'lgu_responder',
+      'municipal_responder',
+      'barangay_responder',
+      'bdrrmo',
+      'mdrrmo_admin',
+      'mdrrmo_staff',
+      'mayor'
+    ];
     if (!data || !lguRoles.includes(data.role)) {
       goto('/login');
       return;
